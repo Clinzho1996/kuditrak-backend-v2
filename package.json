@@ -1,0 +1,31 @@
+{
+	"name": "kuditrak-backend",
+	"version": "2.0.0",
+	"description": "Kuditrak V2 Backend",
+	"main": "src/server.js",
+	"type": "module",
+	"scripts": {
+		"dev": "nodemon src/server.js",
+		"start": "node src/server.js"
+	},
+	"dependencies": {
+		"axios": "^1.13.6",
+		"bcrypt": "^6.0.0",
+		"cloudinary": "^2.9.0",
+		"cors": "^2.8.6",
+		"dotenv": "^17.3.1",
+		"expo-server-sdk": "^6.1.0",
+		"express": "^5.2.1",
+		"firebase-admin": "^13.7.0",
+		"google-auth-library": "^10.6.2",
+		"jsonwebtoken": "^9.0.3",
+		"mongoose": "^9.3.0",
+		"multer": "^2.1.1",
+		"node-cron": "^4.2.1",
+		"resend": "^6.9.3",
+		"revenuecat": "^1.0.0"
+	},
+	"devDependencies": {
+		"nodemon": "^3.0.1"
+	}
+}
