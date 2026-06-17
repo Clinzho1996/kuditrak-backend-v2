@@ -9,6 +9,7 @@
 		"start": "node src/server.js"
 	},
 	"dependencies": {
+		"aes-everywhere": "^1.0.0",
 		"axios": "^1.13.6",
 		"bcrypt": "^6.0.0",
 		"cloudinary": "^2.9.0",
