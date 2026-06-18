@@ -5,7 +5,10 @@ import AES256 from "aes-everywhere";
 import axios from "axios";
 import dotenv from "dotenv";
 
-dotenv.config({ path: ".env.local" });
+// Only look for .env.local if NOT running on Render
+if (process.env.NODE_ENV !== "production") {
+	dotenv.config({ path: ".env.local" });
+}
 
 const BRIDGECARD_BASE_URL =
 	process.env.BRIDGECARD_BASE_URL ||
