@@ -15,7 +15,7 @@ export const createVirtualCard = async (req, res) => {
 
 		// Validate currency
 		if (!["USD", "NGN"].includes(currency)) {
-			return res.status(400).json({ error: "Currency must be USD or NGN" });
+			return res.status(400).json({ error: "Currency must be USD or NGN." });
 		}
 
 		// Get cardholder
