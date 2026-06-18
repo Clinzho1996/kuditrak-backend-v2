@@ -581,6 +581,523 @@ export const createUSDCard = async ({
 	}
 };
 
+// backend/services/bridgecardService.js - Add NGN card functions
+
+/**
+ * Create a NGN card (Virtual or Physical)
+ * @param {string} cardholderId - Cardholder ID
+ * @param {string} cardType - "virtual" or "physical"
+ * @param {string} cardBrand - "Mastercard" or "Visa"
+ * @param {string} cardLimit - "500000" (₦500,000) or "1000000" (₦1,000,000)
+ * @param {string} fundingAmount - Minimum funding amount in NGN
+ * @param {string} pin - 4-digit PIN (will be encrypted)
+ * @param {object} metadata - Additional metadata
+ */
+
+// backend/services/bridgecardService.js - Fix createNGNCard
+
+// backend/services/bridgecardService.js - Updated createNGNCard
+
+/**
+ * Create NGN Card (Virtual or Physical)
+ * Requires NIN (National Identification Number)
+ */
+export const createNGNCard = async ({
+	cardholderId,
+	cardType = "virtual",
+	cardBrand = "Mastercard",
+	pin = null,
+	nin = null,
+	metadata = {},
+}) => {
+	try {
+		// Validate NIN - Required for NGN cards
+		if (!nin) {
+			return {
+				success: false,
+				error: "NIN (National Identification Number) is required for NGN cards",
+			};
+		}
+
+		// Validate NIN format
+		if (!/^\d{11}$/.test(nin)) {
+			return {
+				success: false,
+				error: "Invalid NIN format. Must be 11 digits.",
+			};
+		}
+
+		// Encrypt PIN if provided
+		let encryptedPin = null;
+		if (pin) {
+			if (!/^\d{4}$/.test(pin)) {
+				return {
+					success: false,
+					error: "PIN must be exactly 4 digits",
+				};
+			}
+			encryptedPin = encryptPin(pin);
+		}
+
+		// Build payload - exactly as Bridgecard expects
+		const payload = {
+			cardholder_id: cardholderId,
+			card_type: cardType,
+			card_brand: "Mastercard",
+			card_currency: "NGN",
+			nin: nin,
+		};
+
+		// Add PIN if provided
+		if (encryptedPin) {
+			payload.pin = encryptedPin;
+		}
+
+		// Add metadata
+		if (metadata && Object.keys(metadata).length > 0) {
+			payload.meta_data = metadata;
+		}
+
+		console.log(
+			"📝 Creating NGN card with payload:",
+			JSON.stringify(payload, null, 2),
+		);
+
+		// Try with increased timeout
+		const response = await bridgecardApi.post("/cards/create_card", payload, {
+			timeout: 120000, // 120 seconds timeout
+		});
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				cardId: response.data.data?.card_id,
+				cardDetails: response.data.data,
+				message: response.data.message || "NGN card created successfully",
+			};
+		}
+
+		// Check for specific error messages
+		if (response.data?.detail) {
+			const errorMessages = response.data.detail
+				.map((d) => d.msg || d)
+				.join(", ");
+			return {
+				success: false,
+				error:
+					errorMessages || response.data?.message || "NGN card creation failed",
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "NGN card creation failed",
+		};
+	} catch (error) {
+		console.error("❌ NGN Card Creation Error:", error.message);
+
+		// Handle specific error cases
+		if (error.response) {
+			console.error("Status:", error.response.status);
+			console.error("Data:", JSON.stringify(error.response.data, null, 2));
+
+			// If 504, suggest trying again or using async
+			if (error.response.status === 504) {
+				return {
+					success: false,
+					error:
+						"NGN card creation timed out. Please try again or use the async registration.",
+					isTimeout: true,
+				};
+			}
+
+			return {
+				success: false,
+				error: error.response.data?.message || "NGN card creation failed",
+				details: error.response.data,
+			};
+		}
+
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Create NGN Card Asynchronously (Recommended for NGN)
+ * Returns immediately with cardholder_id, KYC verified via webhook
+ */
+export const createNGNCardAsync = async ({
+	cardholderId,
+	cardType = "virtual",
+	cardBrand = "Mastercard",
+	pin = null,
+	nin = null,
+	metadata = {},
+}) => {
+	try {
+		// Validate NIN
+		if (!nin || !/^\d{11}$/.test(nin)) {
+			return {
+				success: false,
+				error: "Valid 11-digit NIN is required for NGN cards",
+			};
+		}
+
+		// Encrypt PIN if provided
+		let encryptedPin = null;
+		if (pin) {
+			if (!/^\d{4}$/.test(pin)) {
+				return {
+					success: false,
+					error: "PIN must be exactly 4 digits",
+				};
+			}
+			encryptedPin = encryptPin(pin);
+		}
+
+		const payload = {
+			cardholder_id: cardholderId,
+			card_type: cardType,
+			card_brand: "Mastercard",
+			card_currency: "NGN",
+			nin: nin,
+		};
+
+		if (encryptedPin) {
+			payload.pin = encryptedPin;
+		}
+
+		if (metadata && Object.keys(metadata).length > 0) {
+			payload.meta_data = metadata;
+		}
+
+		console.log(
+			"📝 Creating NGN card async with payload:",
+			JSON.stringify(payload, null, 2),
+		);
+
+		// Use the async endpoint
+		const response = await bridgecardApi.post("/cards/create_card", payload, {
+			timeout: 30000,
+		});
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				cardholderId: response.data.data?.cardholder_id,
+				message: response.data.message || "NGN card creation initiated",
+				status: "pending",
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "NGN card creation failed",
+		};
+	} catch (error) {
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Fund NGN Card
+ */
+export const fundNGNCard = async (
+	cardId,
+	amount,
+	transactionReference = null,
+) => {
+	try {
+		const payload = {
+			card_id: cardId,
+			amount: amount.toString(),
+		};
+
+		if (transactionReference) {
+			payload.transaction_reference = transactionReference;
+		}
+
+		const response = await bridgecardApi.post(
+			"/naira_cards/fund_naira_card",
+			payload,
+		);
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				message: response.data.message,
+				data: response.data.data,
+				transactionReference: response.data.data?.transaction_reference,
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "NGN funding failed",
+		};
+	} catch (error) {
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Unload NGN Card
+ */
+export const unloadNGNCard = async (
+	cardId,
+	amount,
+	transactionReference = null,
+) => {
+	try {
+		const payload = {
+			card_id: cardId,
+			amount: amount.toString(),
+		};
+
+		if (transactionReference) {
+			payload.transaction_reference = transactionReference;
+		}
+
+		const response = await bridgecardApi.patch(
+			"/naira_cards/unload_naira_card",
+			payload,
+		);
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				message: response.data.message,
+				data: response.data.data,
+				transactionReference: response.data.data?.transaction_reference,
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "NGN unload failed",
+		};
+	} catch (error) {
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Get NGN Card Balance
+ */
+export const getNGNCardBalance = async (cardholderId) => {
+	try {
+		const response = await bridgecardApi.get(
+			`/naira_cards/get_card_balance?cardholder_id=${cardholderId}`,
+		);
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				balance: response.data.data?.balance || 0,
+				currency: "NGN",
+				data: response.data.data,
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "Failed to fetch balance",
+		};
+	} catch (error) {
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Get NGN Card Transactions
+ */
+export const getNGNCardTransactions = async (cardId, page = 1) => {
+	try {
+		const response = await bridgecardApi.get(
+			`/cards/get_naira_card_transactions?card_id=${cardId}&page=${page}`,
+		);
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				transactions: response.data.data,
+				total: response.data.total || 0,
+				page: response.data.page || 1,
+				totalPages: response.data.total_pages || 1,
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "Failed to fetch transactions",
+		};
+	} catch (error) {
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Freeze NGN Card
+ */
+export const freezeNGNCard = async (cardId) => {
+	try {
+		const response = await bridgecardApi.patch(
+			`/naira_cards/freeze_card?card_id=${cardId}`,
+		);
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				message: response.data.message,
+				data: response.data.data,
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "Failed to freeze card",
+		};
+	} catch (error) {
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Unfreeze NGN Card
+ */
+export const unfreezeNGNCard = async (cardId) => {
+	try {
+		const response = await bridgecardApi.patch(
+			`/naira_cards/unfreeze_card?card_id=${cardId}`,
+		);
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				message: response.data.message,
+				data: response.data.data,
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "Failed to unfreeze card",
+		};
+	} catch (error) {
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Get OTP for NGN Card Transaction
+ */
+export const getNGNCardOTP = async (cardId, amount) => {
+	try {
+		// Amount should be in Kobo
+		const amountInKobo = Math.round(amount * 100);
+
+		const response = await bridgecardApi.get(
+			`/naira_cards/get_otp_message?card_id=${cardId}&amount=${amountInKobo}`,
+		);
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				otp: response.data.data?.otp,
+				message: response.data.data?.message,
+				data: response.data.data,
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "Failed to get OTP",
+		};
+	} catch (error) {
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Mock Debit NGN Card (Sandbox only)
+ */
+export const mockDebitNGNCard = async (cardId, amount = 100) => {
+	try {
+		const payload = {
+			card_id: cardId,
+			amount: amount.toString(),
+		};
+
+		const response = await bridgecardApi.patch(
+			"/naira_cards/mock_debit_naira_card",
+			payload,
+		);
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				message: response.data.message,
+				data: response.data.data,
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "Mock debit failed",
+		};
+	} catch (error) {
+		return handleBridgecardError(error);
+	}
+};
+/**
+ * Create NGN Physical Card
+ */
+export const createNGNPhysicalCard = async (
+	cardholderId,
+	shippingAddress,
+	metadata = {},
+) => {
+	try {
+		const payload = {
+			cardholder_id: cardholderId,
+			currency: "NGN",
+			card_type: "physical",
+			shipping_address: shippingAddress,
+			meta_data: metadata,
+		};
+
+		console.log(
+			"📝 Creating NGN physical card with payload:",
+			JSON.stringify(payload, null, 2),
+		);
+
+		const response = await bridgecardApi.post(
+			"/card/create_physical_card",
+			payload,
+		);
+
+		if (response.data?.status === "success") {
+			return {
+				success: true,
+				cardId: response.data.data?.card_id,
+				cardDetails: response.data.data,
+				message: response.data.message,
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "NGN physical card creation failed",
+		};
+	} catch (error) {
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Fund NGN Card
+ */
+
 /**
  * Activate Physical USD Card
  */
@@ -1030,11 +1547,23 @@ export default {
 	// USD Cards
 	createUSDCard,
 	activatePhysicalCard,
+	createPhysicalCard,
+	createNGNPhysicalCard,
+	getNGNCardOTP,
+	getNGNCardTransactions,
+	getNGNCardBalance,
+	freezeNGNCard,
+	unfreezeNGNCard,
+	mockDebitNGNCard,
 	getCardDetails,
 	getCardBalance,
+	createNGNCard,
+	fundNGNCard,
+	unloadNGNCard,
 	fundCard,
 	unloadCard,
 	mockDebitTransaction,
+	createNGNCardAsync,
 	getCardTransactions,
 	getTransactionById,
 	getTransactionStatus,

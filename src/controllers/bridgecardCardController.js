@@ -1067,3 +1067,647 @@ export const getCardTransactions = async (req, res) => {
 		res.status(500).json({ error: error.message });
 	}
 };
+
+// backend/controllers/bridgecardCardController.js - Updated createNGNCard
+
+/**
+ * Create NGN Virtual Card with retry logic
+ */
+export const createNGNCard = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const {
+			cardType = "virtual",
+			pin = null,
+			nin = null,
+			metadata = {},
+		} = req.body;
+
+		// Validate NIN
+		if (!nin) {
+			return res.status(400).json({
+				success: false,
+				error: "NIN (National Identification Number) is required for NGN cards",
+			});
+		}
+
+		if (!/^\d{11}$/.test(nin)) {
+			return res.status(400).json({
+				success: false,
+				error: "Invalid NIN format. Must be 11 digits.",
+			});
+		}
+
+		// Validate PIN
+		if (pin && !/^\d{4}$/.test(pin)) {
+			return res.status(400).json({
+				success: false,
+				error: "PIN must be exactly 4 digits",
+			});
+		}
+
+		// Get cardholder
+		const cardholder = await BridgecardCardholder.findOne({ userId });
+		if (!cardholder) {
+			return res.status(404).json({
+				success: false,
+				error: "Cardholder not found. Please register first.",
+			});
+		}
+
+		if (!cardholder.isActive || !cardholder.isIdVerified) {
+			return res.status(403).json({
+				success: false,
+				error: "Cardholder not verified. Please complete KYC verification.",
+				status: {
+					isActive: cardholder.isActive,
+					isIdVerified: cardholder.isIdVerified,
+				},
+			});
+		}
+
+		// Try to create NGN card with retry
+		let result = null;
+		let attempts = 0;
+		const maxAttempts = 2;
+
+		while (attempts < maxAttempts) {
+			attempts++;
+			console.log(`🔄 Attempt ${attempts} to create NGN card...`);
+
+			result = await bridgecardService.createNGNCard({
+				cardholderId: cardholder.cardholderId,
+				cardType,
+				pin,
+				nin,
+				metadata: {
+					userId: userId.toString(),
+					...metadata,
+				},
+			});
+
+			// If success or not a timeout, break
+			if (result.success || !result.isTimeout) {
+				break;
+			}
+
+			console.log(`⏳ Timeout on attempt ${attempts}, retrying...`);
+			// Wait 2 seconds before retry
+			await new Promise((resolve) => setTimeout(resolve, 2000));
+		}
+
+		if (!result || !result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result?.error || "NGN card creation failed",
+				suggestion:
+					"Try using the async endpoint or check your NGN wallet balance",
+			});
+		}
+
+		// Get card details
+		const cardDetails = await bridgecardService.getCardDetails(result.cardId);
+		let last4 = "0000";
+		let expiryMonth = "12";
+		let expiryYear = "28";
+
+		if (cardDetails.success && cardDetails.card) {
+			last4 = cardDetails.card.last4 || "0000";
+			expiryMonth = cardDetails.card.expiry_month || "12";
+			expiryYear = cardDetails.card.expiry_year || "28";
+		}
+
+		// Save to database
+		const newCard = await BridgecardCard.create({
+			userId,
+			cardholderId: cardholder.cardholderId,
+			cardId: result.cardId,
+			currency: "NGN",
+			cardType: cardType,
+			cardBrand: "mastercard",
+			last4,
+			expiryMonth,
+			expiryYear,
+			cardholderName: req.user.fullName,
+			status: "active",
+			metaData: {
+				nin,
+				...metadata,
+				bridgecardData: result.cardDetails,
+			},
+			isBridgecardCard: true,
+		});
+
+		await sendPushToUser(
+			userId,
+			`💳 NGN ${cardType.charAt(0).toUpperCase() + cardType.slice(1)} Card Created!`,
+			`Your NGN ${cardType} card ending in ${last4} has been created.`,
+			{ type: "bridgecard_ngn_card_created", cardId: result.cardId },
+		);
+
+		res.status(201).json({
+			success: true,
+			message: `NGN ${cardType} card created successfully`,
+			card: {
+				id: newCard._id,
+				cardId: result.cardId,
+				currency: "NGN",
+				cardType,
+				last4,
+				expiryMonth,
+				expiryYear,
+				status: "active",
+				cardholderName: req.user.fullName,
+				details: result.cardDetails,
+			},
+		});
+	} catch (error) {
+		console.error("Create NGN card error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+/**
+ * Create NGN Card Asynchronously (Recommended)
+ */
+export const createNGNCardAsync = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const {
+			cardType = "virtual",
+			pin = null,
+			nin = null,
+			metadata = {},
+		} = req.body;
+
+		// Validate NIN
+		if (!nin || !/^\d{11}$/.test(nin)) {
+			return res.status(400).json({
+				success: false,
+				error: "Valid 11-digit NIN is required for NGN cards",
+			});
+		}
+
+		// Validate PIN
+		if (pin && !/^\d{4}$/.test(pin)) {
+			return res.status(400).json({
+				success: false,
+				error: "PIN must be exactly 4 digits",
+			});
+		}
+
+		// Get cardholder
+		const cardholder = await BridgecardCardholder.findOne({ userId });
+		if (!cardholder) {
+			return res.status(404).json({
+				success: false,
+				error: "Cardholder not found. Please register first.",
+			});
+		}
+
+		if (!cardholder.isActive || !cardholder.isIdVerified) {
+			return res.status(403).json({
+				success: false,
+				error: "Cardholder not verified. Please complete KYC verification.",
+			});
+		}
+
+		// Create NGN card asynchronously
+		const result = await bridgecardService.createNGNCardAsync({
+			cardholderId: cardholder.cardholderId,
+			cardType,
+			pin,
+			nin,
+			metadata: {
+				userId: userId.toString(),
+				...metadata,
+			},
+		});
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		res.status(202).json({
+			success: true,
+			message:
+				"NGN card creation initiated. You will receive a webhook when ready.",
+			status: "pending",
+			cardholderId: result.cardholderId,
+		});
+	} catch (error) {
+		console.error("Create NGN card async error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+/**
+ * Fund NGN Card
+ */
+export const fundNGNCard = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { cardId, amount, transactionReference = null } = req.body;
+
+		if (!amount || amount <= 0) {
+			return res.status(400).json({
+				success: false,
+				error: "Valid amount required",
+			});
+		}
+
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return res.status(404).json({
+				success: false,
+				error: "Card not found",
+			});
+		}
+
+		const result = await bridgecardService.fundNGNCard(
+			card.cardId,
+			amount,
+			transactionReference,
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		await sendPushToUser(
+			userId,
+			"💰 NGN Card Funded",
+			`₦${amount} has been added to your NGN card ending in ${card.last4}.`,
+			{ type: "ngn_card_funded", cardId: card.cardId, amount },
+		);
+
+		res.status(200).json({
+			success: true,
+			message: "NGN card funded successfully",
+			transactionReference: result.transactionReference,
+			data: result.data,
+		});
+	} catch (error) {
+		console.error("Fund NGN card error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+/**
+ * Unload NGN Card
+ */
+export const unloadNGNCard = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { cardId, amount, transactionReference = null } = req.body;
+
+		if (!amount || amount <= 0) {
+			return res.status(400).json({
+				success: false,
+				error: "Valid amount required",
+			});
+		}
+
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return res.status(404).json({
+				success: false,
+				error: "Card not found",
+			});
+		}
+
+		const result = await bridgecardService.unloadNGNCard(
+			card.cardId,
+			amount,
+			transactionReference,
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		await sendPushToUser(
+			userId,
+			"💸 NGN Card Unloaded",
+			`₦${amount} has been withdrawn from your NGN card ending in ${card.last4}.`,
+			{ type: "ngn_card_unloaded", cardId: card.cardId, amount },
+		);
+
+		res.status(200).json({
+			success: true,
+			message: "NGN card unloaded successfully",
+			transactionReference: result.transactionReference,
+			data: result.data,
+		});
+	} catch (error) {
+		console.error("Unload NGN card error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+/**
+ * Get NGN Card Balance
+ */
+export const getNGNCardBalance = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { cardId } = req.params;
+
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return res.status(404).json({
+				success: false,
+				error: "Card not found",
+			});
+		}
+
+		// Get cardholder
+		const cardholder = await BridgecardCardholder.findOne({ userId });
+		if (!cardholder) {
+			return res.status(404).json({
+				success: false,
+				error: "Cardholder not found",
+			});
+		}
+
+		const result = await bridgecardService.getNGNCardBalance(
+			cardholder.cardholderId,
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		res.status(200).json({
+			success: true,
+			balance: result.balance,
+			currency: "NGN",
+			card: {
+				id: card._id,
+				cardId: card.cardId,
+				last4: card.last4,
+			},
+		});
+	} catch (error) {
+		console.error("Get NGN card balance error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+/**
+ * Get NGN Card Transactions
+ */
+export const getNGNCardTransactions = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { cardId } = req.params;
+		const { page = 1 } = req.query;
+
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return res.status(404).json({
+				success: false,
+				error: "Card not found",
+			});
+		}
+
+		const result = await bridgecardService.getNGNCardTransactions(
+			card.cardId,
+			parseInt(page),
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		res.status(200).json({
+			success: true,
+			transactions: result.transactions,
+			pagination: {
+				page: result.page,
+				total: result.total,
+				totalPages: result.totalPages,
+			},
+		});
+	} catch (error) {
+		console.error("Get NGN card transactions error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+/**
+ * Get OTP for NGN Card Transaction
+ */
+export const getNGNCardOTP = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { cardId } = req.params;
+		const { amount } = req.query;
+
+		if (!amount || amount <= 0) {
+			return res.status(400).json({
+				success: false,
+				error: "Valid amount required",
+			});
+		}
+
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return res.status(404).json({
+				success: false,
+				error: "Card not found",
+			});
+		}
+
+		const result = await bridgecardService.getNGNCardOTP(
+			card.cardId,
+			parseFloat(amount),
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		res.status(200).json({
+			success: true,
+			otp: result.otp,
+			message: result.message,
+			data: result.data,
+		});
+	} catch (error) {
+		console.error("Get NGN card OTP error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+/**
+ * Freeze NGN Card
+ */
+export const freezeNGNCard = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { cardId } = req.params;
+
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return res.status(404).json({
+				success: false,
+				error: "Card not found",
+			});
+		}
+
+		if (card.status === "frozen") {
+			return res.status(400).json({
+				success: false,
+				error: "Card is already frozen",
+			});
+		}
+
+		const result = await bridgecardService.freezeNGNCard(card.cardId);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		card.status = "frozen";
+		await card.save();
+
+		await sendPushToUser(
+			userId,
+			"🔒 NGN Card Frozen",
+			`Your NGN card ending in ${card.last4} has been frozen.`,
+			{ type: "ngn_card_frozen", cardId: card.cardId },
+		);
+
+		res.status(200).json({
+			success: true,
+			message: "NGN card frozen successfully",
+			card: {
+				id: card._id,
+				cardId: card.cardId,
+				status: card.status,
+				last4: card.last4,
+			},
+		});
+	} catch (error) {
+		console.error("Freeze NGN card error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+/**
+ * Unfreeze NGN Card
+ */
+export const unfreezeNGNCard = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { cardId } = req.params;
+
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return res.status(404).json({
+				success: false,
+				error: "Card not found",
+			});
+		}
+
+		if (card.status === "active") {
+			return res.status(400).json({
+				success: false,
+				error: "Card is already active",
+			});
+		}
+
+		const result = await bridgecardService.unfreezeNGNCard(card.cardId);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		card.status = "active";
+		await card.save();
+
+		await sendPushToUser(
+			userId,
+			"🔓 NGN Card Unfrozen",
+			`Your NGN card ending in ${card.last4} has been unfrozen.`,
+			{ type: "ngn_card_unfrozen", cardId: card.cardId },
+		);
+
+		res.status(200).json({
+			success: true,
+			message: "NGN card unfrozen successfully",
+			card: {
+				id: card._id,
+				cardId: card.cardId,
+				status: card.status,
+				last4: card.last4,
+			},
+		});
+	} catch (error) {
+		console.error("Unfreeze NGN card error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+/**
+ * Mock Debit NGN Card (Sandbox only)
+ */
+export const mockDebitNGNCard = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { cardId, amount = 100 } = req.body;
+
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return res.status(404).json({
+				success: false,
+				error: "Card not found",
+			});
+		}
+
+		const result = await bridgecardService.mockDebitNGNCard(
+			card.cardId,
+			amount,
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		res.status(200).json({
+			success: true,
+			message: "Mock debit successful",
+			data: result.data,
+		});
+	} catch (error) {
+		console.error("Mock debit NGN card error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
