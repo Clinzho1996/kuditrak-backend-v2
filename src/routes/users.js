@@ -47,7 +47,7 @@ router.post("/kyc", protect, updateKYC);
 
 // Get KYC status
 router.get("/kyc/status", protect, getKYCStatus);
-router.post("/upload-id-image", upload.single("image"), uploadIDImage);
+router.post("/upload-id-image", protect, upload.single("image"), uploadIDImage);
 router.post("/anchor/retry", protect, retryAnchorCustomerCreation);
 router.get("/anchor/status", protect, getAnchorCustomerStatus);
 
