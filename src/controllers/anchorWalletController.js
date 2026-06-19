@@ -10,9 +10,6 @@ import { sendPushToUser } from "../services/pushService.js";
 
 // ==================== WALLET CREATION ====================
 
-/**
- * Create a wallet (deposit account) for a user
- */
 export const createWallet = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -40,6 +37,7 @@ export const createWallet = async (req, res) => {
 					status: existingWallet.status,
 					accountNumber: existingWallet.accountNumber,
 					bankName: existingWallet.bankName,
+					isLocal: existingWallet.isLocal || false,
 				},
 			});
 		}
@@ -52,7 +50,7 @@ export const createWallet = async (req, res) => {
 				customerResult.error,
 			);
 
-			// Create local wallet anyway
+			// Create local wallet if Anchor customer fails
 			const wallet = await AnchorWallet.create({
 				userId,
 				anchorCustomerId: `local_${Date.now()}`,
@@ -80,9 +78,12 @@ export const createWallet = async (req, res) => {
 			});
 		}
 
-		// Create deposit account (wallet) via Anchor
+		// Try to create deposit account via Anchor
 		let accountResponse;
+		let virtualNuban = null;
+
 		try {
+			// First, try to create a deposit account
 			accountResponse = await anchorService.createDepositAccount(
 				customerResult.customerId,
 				"SAVINGS",
@@ -93,40 +94,43 @@ export const createWallet = async (req, res) => {
 					currency: currency,
 				},
 			);
+
+			if (accountResponse?.success) {
+				console.log("✅ Deposit account created:", accountResponse.accountId);
+
+				// Try to create virtual NUBAN
+				try {
+					const nubanResponse = await anchorService.createVirtualNuban(
+						accountResponse.accountId,
+						{ userId: userId.toString() },
+					);
+					if (nubanResponse.success) {
+						virtualNuban = nubanResponse;
+						console.log(
+							`✅ Virtual NUBAN created: ${nubanResponse.accountNumber}`,
+						);
+					}
+				} catch (nubanError) {
+					console.log("⚠️ Could not create virtual NUBAN:", nubanError.message);
+				}
+			} else {
+				console.log(
+					"⚠️ Anchor deposit account creation failed, using local wallet",
+				);
+			}
 		} catch (anchorError) {
-			console.log(
-				"⚠️ Anchor deposit account creation failed:",
-				anchorError.message,
-			);
+			console.log("⚠️ Anchor error, using local wallet:", anchorError.message);
 			accountResponse = { success: false };
 		}
 
-		// Create virtual NUBAN if account was created
-		let virtualNuban = null;
-		if (accountResponse?.success) {
-			try {
-				const nubanResponse = await anchorService.createVirtualNuban(
-					accountResponse.accountId,
-					{ userId: userId.toString() },
-				);
-				if (nubanResponse.success) {
-					virtualNuban = nubanResponse;
-					console.log(
-						`✅ Virtual NUBAN created: ${nubanResponse.accountNumber}`,
-					);
-				}
-			} catch (nubanError) {
-				console.log("⚠️ Could not create virtual NUBAN:", nubanError.message);
-			}
-		}
-
 		// Save wallet to database
+		const isLocal = !accountResponse?.success;
 		const walletData = {
 			userId,
 			anchorCustomerId: customerResult.customerId,
 			walletId: accountResponse?.success
 				? accountResponse.accountId
-				: `local_${Date.now()}`,
+				: `local_${Date.now()}_${userId.toString().slice(-6)}`,
 			walletType: "main",
 			balance: 0,
 			name: "Main Wallet",
@@ -134,12 +138,12 @@ export const createWallet = async (req, res) => {
 			status: "active",
 			accountNumber: virtualNuban?.accountNumber || null,
 			bankName: virtualNuban?.bankName || null,
-			isLocal: !accountResponse?.success,
+			isLocal: isLocal,
 		};
 
 		const wallet = await AnchorWallet.create(walletData);
 
-		// Also save virtual account reference if NUBAN was created
+		// Save virtual account reference if NUBAN was created
 		if (virtualNuban) {
 			await AnchorVirtualAccount.create({
 				userId,
@@ -156,13 +160,15 @@ export const createWallet = async (req, res) => {
 			});
 		}
 
-		console.log("✅ Wallet created:", wallet.walletId);
+		console.log(
+			"✅ Wallet created:",
+			wallet.walletId,
+			isLocal ? "(local)" : "(Anchor)",
+		);
 
 		res.status(201).json({
 			success: true,
-			message: accountResponse?.success
-				? "Wallet created successfully"
-				: "Local wallet created",
+			message: isLocal ? "Local wallet created" : "Wallet created successfully",
 			wallet: {
 				id: wallet._id,
 				walletId: wallet.walletId,
@@ -208,14 +214,21 @@ export const getBalance = async (req, res) => {
 			});
 		}
 
+		// Get virtual accounts for additional info
 		const virtualAccounts = await AnchorVirtualAccount.find({
 			userId,
 			isActive: true,
 		});
 
 		let balance = wallet.balance;
-		try {
-			if (!wallet.isLocal) {
+
+		// ✅ Only fetch from Anchor if it's NOT a local wallet
+		if (
+			!wallet.isLocal &&
+			wallet.walletId &&
+			!wallet.walletId.startsWith("local_")
+		) {
+			try {
 				const balanceResponse = await anchorService.getDepositAccountBalance(
 					wallet.walletId,
 				);
@@ -224,12 +237,19 @@ export const getBalance = async (req, res) => {
 					wallet.balance = balance;
 					await wallet.save();
 				}
+			} catch (err) {
+				console.log("⚠️ Could not fetch real-time balance:", err.message);
+				// If Anchor fails, use local balance
+				balance = wallet.balance;
 			}
-		} catch (err) {
-			console.log("⚠️ Could not fetch real-time balance:", err.message);
+		} else {
+			console.log(
+				"📊 Using local wallet balance (not synced with Anchor):",
+				wallet.balance,
+			);
 		}
 
-		res.status(200).json({
+		const responseData = {
 			success: true,
 			balance: balance,
 			available: balance,
@@ -241,10 +261,15 @@ export const getBalance = async (req, res) => {
 			bankName: virtualAccounts[0]?.bankName || wallet.bankName || null,
 			anchorCustomerId: wallet.anchorCustomerId,
 			isLocal: wallet.isLocal || false,
-		});
+		};
+
+		res.status(200).json(responseData);
 	} catch (error) {
 		console.error("Get balance error:", error);
-		res.status(500).json({ error: error.message });
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
 	}
 };
 
@@ -674,9 +699,6 @@ export const createVirtualAccount = async (req, res) => {
 	}
 };
 
-/**
- * Top up wallet
- */
 export const topupWallet = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -714,11 +736,16 @@ export const topupWallet = async (req, res) => {
 			});
 		}
 
-		// For sandbox, simulate successful topup
 		const isSandbox = process.env.NODE_ENV !== "production" || true;
 		const reference = `TOPUP_${Date.now()}_${userId.toString().slice(-6)}`;
 
-		// ✅ Create transaction with valid enum values
+		// Update wallet balance
+		wallet.balance += amount;
+		await wallet.save();
+
+		console.log(`✅ Topup: +${amount}, new balance: ${wallet.balance}`);
+
+		// Create transaction record
 		const transaction = await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: wallet.anchorCustomerId,
@@ -726,28 +753,19 @@ export const topupWallet = async (req, res) => {
 			amount,
 			currency: currency,
 			type: "credit",
-			category: "deposit", // Valid enum value
-			status: isSandbox ? "success" : "pending",
+			category: "deposit",
+			status: "success",
 			description: `Wallet top-up of ${currency} ${amount}`,
-			source: "wallet", // Valid enum value
-			destination: "wallet", // Valid enum value
+			source: "wallet",
+			destination: "wallet",
 			metadata: {
 				reference,
 				isSandbox,
 				simulated: isSandbox,
 				timestamp: new Date().toISOString(),
-				topupType: "card",
+				isLocal: wallet.isLocal || false,
 			},
 		});
-
-		// Update wallet balance immediately in sandbox
-		if (isSandbox) {
-			wallet.balance += amount;
-			await wallet.save();
-			console.log(
-				`✅ Sandbox topup: +${amount}, new balance: ${wallet.balance}`,
-			);
-		}
 
 		await sendPushToUser(
 			userId,
@@ -761,12 +779,6 @@ export const topupWallet = async (req, res) => {
 				isSandbox,
 			},
 		);
-
-		console.log("✅ Topup processed:", {
-			reference,
-			amount,
-			newBalance: wallet.balance,
-		});
 
 		res.status(200).json({
 			success: true,
