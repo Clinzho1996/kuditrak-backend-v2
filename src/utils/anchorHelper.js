@@ -90,22 +90,28 @@ export const splitFullName = (fullName) => {
  * @param {Object} address - Address object from user
  * @returns {Object} Formatted address for Anchor
  */
-export const formatAddress = (address) => {
-	// Make sure we have a valid street address
-	let streetAddress =
-		address?.street || address?.addressLine_1 || "Unknown Street";
+// backend/utils/anchorHelper.js - Update formatAddress
 
-	// If street is still null/undefined, use a default
-	if (!streetAddress || streetAddress === null) {
-		streetAddress = "Unknown Street";
+export const formatAddress = (address) => {
+	// If address is already formatted for Anchor, use it directly
+	if (address?.addressLine_1) {
+		return {
+			addressLine_1: address.addressLine_1,
+			addressLine_2: address.addressLine_2 || null,
+			city: address.city || "Lagos",
+			state: address.state || "Lagos",
+			postalCode: address.postalCode || "100001",
+			country: address.country || "NG",
+		};
 	}
 
+	// Otherwise, format from user's KYC data
 	return {
-		addressLine_1: streetAddress,
-		addressLine_2: address?.addressLine_2 || address?.street2 || null,
+		addressLine_1: address?.street || "123 Test Street",
+		addressLine_2: null,
 		city: address?.city || "Lagos",
 		state: address?.state || "Lagos",
-		postalCode: address?.postalCode || "000000",
+		postalCode: address?.postalCode || "100001",
 		country: address?.country || "NG",
 	};
 };
