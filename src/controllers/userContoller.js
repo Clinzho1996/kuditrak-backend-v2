@@ -122,14 +122,14 @@ export const updateProfileImage = async (req, res) => {
 	}
 };
 
-// backend/controllers/userController.js - Updated updateKYC
+// backend/controllers/userController.js - Updated updateKYC with virtual account creation
 
 export const updateKYC = async (req, res) => {
 	try {
 		const userId = req.user._id;
 		const { bvn, dateOfBirth, gender, address, identification } = req.body;
 
-		console.log("🔵 KYC Update Request Started");
+		console.log("🔵 KYC Update Request Started with Anchor");
 		console.log("User ID:", userId);
 
 		const user = await User.findById(userId);
@@ -163,8 +163,8 @@ export const updateKYC = async (req, res) => {
 			if (gender) user.kyc.gender = gender;
 			await user.save();
 
-			// Also register with Bridgecard if not already
-			await registerWithBridgecard(userId);
+			// ✅ Create virtual account for the user if they don't have one
+			await createVirtualAccountForUser(userId);
 
 			return res.status(200).json({
 				success: true,
@@ -207,28 +207,28 @@ export const updateKYC = async (req, res) => {
 			);
 
 			if (!upgradeResult.success) {
+				// If already upgraded
+				if (upgradeResult.alreadyUpgraded) {
+					user.kyc.isVerified = true;
+					user.kyc.verifiedAt = new Date();
+					await user.save();
+
+					// ✅ Create virtual account
+					await createVirtualAccountForUser(userId);
+
+					return res.status(200).json({
+						success: true,
+						message: "KYC already verified",
+						kyc: {
+							isVerified: true,
+							isComplete: true,
+						},
+					});
+				}
+
 				return res.status(400).json({
 					error: "KYC upgrade failed",
 					message: upgradeResult.error,
-				});
-			}
-
-			// If already upgraded
-			if (upgradeResult.alreadyUpgraded) {
-				user.kyc.isVerified = true;
-				user.kyc.verifiedAt = new Date();
-				await user.save();
-
-				// Register with Bridgecard
-				await registerWithBridgecard(userId);
-
-				return res.status(200).json({
-					success: true,
-					message: "KYC already verified",
-					kyc: {
-						isVerified: true,
-						isComplete: true,
-					},
 				});
 			}
 
@@ -276,6 +276,131 @@ export const updateKYC = async (req, res) => {
 			error: err.message,
 			message: "Failed to update KYC. Please try again.",
 		});
+	}
+};
+
+/**
+ * Helper function to create virtual account for user
+ */
+export const createVirtualAccountForUser = async (userId) => {
+	try {
+		console.log("🏦 Creating virtual account for user:", userId);
+
+		// Check if user already has a virtual account
+		const existingAccount = await AnchorVirtualAccount.findOne({
+			userId,
+			isActive: true,
+		});
+
+		if (existingAccount) {
+			console.log(
+				"✅ User already has virtual account:",
+				existingAccount.accountNumber,
+			);
+			return {
+				success: true,
+				account: existingAccount,
+				message: "Virtual account already exists",
+			};
+		}
+
+		// Get Anchor customer
+		const anchorCustomer = await AnchorCustomer.findOne({ userId });
+		if (!anchorCustomer) {
+			console.log("❌ No Anchor customer found for user:", userId);
+			return { success: false, error: "Anchor customer not found" };
+		}
+
+		// Check if KYC is completed
+		if (anchorCustomer.kycLevel === "TIER_0") {
+			console.log("⚠️ KYC not completed, skipping virtual account creation");
+			return { success: false, error: "KYC not completed" };
+		}
+
+		// Get user details
+		const user = await User.findById(userId);
+		if (!user) {
+			return { success: false, error: "User not found" };
+		}
+
+		// Create virtual account
+		const accountResponse = await anchorService.createDepositAccount(
+			anchorCustomer.anchorCustomerId,
+			"SAVINGS",
+			{
+				userId: userId.toString(),
+				platform: "kuditrak",
+				currency: "NGN",
+				created_after_kyc: true,
+			},
+		);
+
+		if (!accountResponse.success) {
+			console.error(
+				"❌ Failed to create virtual account:",
+				accountResponse.error,
+			);
+			return { success: false, error: accountResponse.error };
+		}
+
+		// Get account number
+		const accountNumberResponse = await anchorService.getAccountNumber(
+			accountResponse.accountId,
+		);
+
+		// Save to database
+		const virtualAccount = await AnchorVirtualAccount.create({
+			userId,
+			anchorCustomerId: anchorCustomer.anchorCustomerId,
+			walletId: null,
+			accountNumber: accountNumberResponse.success
+				? accountNumberResponse.accountNumber
+				: "pending",
+			bankName: accountNumberResponse.success
+				? accountNumberResponse.bankName
+				: "Anchor Bank",
+			bankCode: "000",
+			accountName: user.fullName,
+			anchorReference: accountResponse.accountId,
+			isActive: true,
+			isMock: false,
+			provider: "anchor",
+			currency: "NGN",
+		});
+
+		// Update wallet with account number
+		const wallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
+
+		if (wallet) {
+			wallet.accountNumber = virtualAccount.accountNumber;
+			wallet.bankName = virtualAccount.bankName;
+			await wallet.save();
+		}
+
+		// Send notification
+		await sendPushToUser(
+			userId,
+			"🏦 Virtual Account Ready",
+			`Your virtual account ${virtualAccount.accountNumber} (${virtualAccount.bankName}) is ready to receive money.`,
+			{
+				type: "virtual_account_created",
+				accountNumber: virtualAccount.accountNumber,
+				bankName: virtualAccount.bankName,
+			},
+		);
+
+		console.log("✅ Virtual account created:", virtualAccount.accountNumber);
+
+		return {
+			success: true,
+			account: virtualAccount,
+		};
+	} catch (error) {
+		console.error("❌ Create virtual account error:", error);
+		return { success: false, error: error.message };
 	}
 };
 

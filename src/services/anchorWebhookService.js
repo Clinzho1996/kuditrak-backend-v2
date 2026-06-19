@@ -1,4 +1,5 @@
 // backend/services/anchorWebhookService.js
+import { createVirtualAccountForUser } from "../controllers/userContoller.js";
 import AnchorCard from "../models/AnchorCard.js";
 import AnchorCustomer from "../models/AnchorCustomer.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
@@ -503,6 +504,48 @@ export const processCardAuthorization = async (payload) => {
 		return { success: false, error: error.message };
 	}
 };
+
+// backend/services/anchorWebhookService.js - Updated KYC approved handler
+
+async function handleCustomerIdentificationApproved(payload) {
+	const customerId = payload.relationships?.customer?.data?.id;
+	if (!customerId) return;
+
+	const anchorCustomer = await AnchorCustomer.findOne({
+		anchorCustomerId: customerId,
+	});
+	if (!anchorCustomer) return;
+
+	// Update customer KYC status
+	anchorCustomer.kycStatus = "approved";
+	anchorCustomer.kycLevel = "TIER_1";
+	await anchorCustomer.save();
+
+	// Update user
+	const user = await User.findById(anchorCustomer.userId);
+	if (user) {
+		user.anchorCustomerStatus = "active";
+		user.anchorKycLevel = "TIER_1";
+		user.kyc.isVerified = true;
+		user.kyc.verifiedAt = new Date();
+		user.kyc.paystackValidationPending = false;
+		await user.save();
+
+		// ✅ Create virtual account for the user
+		await createVirtualAccountForUser(user._id);
+
+		// Send notification
+		await sendPushToUser(
+			user._id,
+			"✅ KYC Approved!",
+			"Your identity has been verified. Your virtual account is ready!",
+			{ type: "kyc_approved", level: "TIER_1" },
+		);
+	}
+
+	console.log(`✅ KYC approved for customer: ${customerId}`);
+	return { success: true, customerId };
+}
 
 export default {
 	processKYCApproved,

@@ -10,6 +10,8 @@ import { sendPushToUser } from "../services/pushService.js";
 /**
  * Get total wallet balance (NGN + USD combined)
  */
+// backend/controllers/walletController.js - Updated getBalance
+
 export const getBalance = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -41,14 +43,20 @@ export const getBalance = async (req, res) => {
 			wallet.walletId,
 		);
 
-		// Get virtual accounts for additional info
+		// ✅ Get virtual accounts for account number
 		const virtualAccounts = await AnchorVirtualAccount.find({
 			userId,
 			isActive: true,
 		});
 
-		// Get USD balance from Bridgecard cards
+		// Get USD balance
 		const usdBalance = await getUSDBalance(userId);
+
+		// ✅ Use real account number from virtual accounts
+		const accountNumber =
+			virtualAccounts.length > 0 ? virtualAccounts[0].accountNumber : null;
+		const bankName =
+			virtualAccounts.length > 0 ? virtualAccounts[0].bankName : null;
 
 		const responseData = {
 			success: true,
@@ -66,12 +74,12 @@ export const getBalance = async (req, res) => {
 			currency: "NGN",
 			walletId: wallet.walletId,
 			walletName: wallet.name,
-			accountNumber: virtualAccounts[0]?.accountNumber || null,
-			bankName: virtualAccounts[0]?.bankName || null,
+			accountNumber: accountNumber, // ✅ Real account number
+			bankName: bankName, // ✅ Real bank name
 			anchorCustomerId: wallet.anchorCustomerId,
 		};
 
-		// Update local balance if we got fresh data
+		// Update local balance
 		if (balanceResponse.success) {
 			wallet.balance = balanceResponse.balance;
 			await wallet.save();
