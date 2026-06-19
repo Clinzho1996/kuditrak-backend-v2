@@ -1,4 +1,5 @@
-// backend/models/AnchorTransaction.js
+// backend/models/AnchorTransaction.js - Updated with more enum values
+
 import mongoose from "mongoose";
 
 const anchorTransactionSchema = new mongoose.Schema({
@@ -74,6 +75,8 @@ const anchorTransactionSchema = new mongoose.Schema({
 			"refund",
 			"interest",
 			"reversal",
+			"topup",
+			"wallet_funding",
 		],
 		required: true,
 	},
@@ -102,7 +105,7 @@ const anchorTransactionSchema = new mongoose.Schema({
 		default: null,
 	},
 
-	// Source/Destination
+	// Source/Destination - UPDATED with more options
 	source: {
 		type: String,
 		enum: [
@@ -112,8 +115,21 @@ const anchorTransactionSchema = new mongoose.Schema({
 			"virtual_account",
 			"sub_account",
 			"external_bank",
+			"manual",
+			"platform",
+			"goal_allocation",
+			"goal_withdrawal",
+			"topup",
+			"deposit",
+			"refund",
+			"transfer",
+			"payment",
+			"savings",
+			"investment",
+			"reward",
+			"bonus",
 		],
-		default: null,
+		default: "wallet",
 	},
 
 	destination: {
@@ -125,14 +141,29 @@ const anchorTransactionSchema = new mongoose.Schema({
 			"virtual_account",
 			"sub_account",
 			"external_bank",
+			"manual",
+			"platform",
+			"goal_allocation",
+			"goal_withdrawal",
+			"fee",
 		],
-		default: null,
+		default: "wallet",
 	},
 
 	// External reference (for external transfers)
 	externalReference: {
 		type: String,
 		default: null,
+	},
+
+	// Opening/closing balance for statement
+	openingBalance: {
+		type: Number,
+		default: 0,
+	},
+	closingBalance: {
+		type: Number,
+		default: 0,
 	},
 
 	// Metadata
@@ -149,5 +180,8 @@ anchorTransactionSchema.index({ userId: 1, createdAt: -1 });
 anchorTransactionSchema.index({ anchorReference: 1 });
 anchorTransactionSchema.index({ status: 1, type: 1 });
 anchorTransactionSchema.index({ walletId: 1, createdAt: -1 });
+anchorTransactionSchema.index({ category: 1 });
+anchorTransactionSchema.index({ source: 1 });
+anchorTransactionSchema.index({ destination: 1 });
 
 export default mongoose.model("AnchorTransaction", anchorTransactionSchema);

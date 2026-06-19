@@ -674,8 +674,6 @@ export const createVirtualAccount = async (req, res) => {
 	}
 };
 
-// ==================== TOP UP ====================
-
 /**
  * Top up wallet
  */
@@ -716,9 +714,11 @@ export const topupWallet = async (req, res) => {
 			});
 		}
 
+		// For sandbox, simulate successful topup
 		const isSandbox = process.env.NODE_ENV !== "production" || true;
 		const reference = `TOPUP_${Date.now()}_${userId.toString().slice(-6)}`;
 
+		// ✅ Create transaction with valid enum values
 		const transaction = await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: wallet.anchorCustomerId,
@@ -726,19 +726,21 @@ export const topupWallet = async (req, res) => {
 			amount,
 			currency: currency,
 			type: "credit",
-			category: "deposit",
+			category: "deposit", // Valid enum value
 			status: isSandbox ? "success" : "pending",
 			description: `Wallet top-up of ${currency} ${amount}`,
-			source: "manual",
-			destination: "wallet",
+			source: "wallet", // Valid enum value
+			destination: "wallet", // Valid enum value
 			metadata: {
 				reference,
 				isSandbox,
 				simulated: isSandbox,
 				timestamp: new Date().toISOString(),
+				topupType: "card",
 			},
 		});
 
+		// Update wallet balance immediately in sandbox
 		if (isSandbox) {
 			wallet.balance += amount;
 			await wallet.save();
@@ -788,6 +790,8 @@ export const topupWallet = async (req, res) => {
 	}
 };
 
+// backend/controllers/anchorWalletController.js - Updated verifyTopup
+
 /**
  * Verify topup
  */
@@ -820,13 +824,15 @@ export const verifyTopup = async (req, res) => {
 				success: true,
 				message: "Transaction already verified",
 				transaction,
-				newBalance: transaction.amount,
+				newBalance: transaction.metadata?.newBalance || 0,
 			});
 		}
 
+		// Update transaction status
 		transaction.status = "success";
 		await transaction.save();
 
+		// Update wallet balance if not already updated
 		const wallet = await AnchorWallet.findById(transaction.walletId);
 		if (wallet) {
 			wallet.balance += transaction.amount;
@@ -857,11 +863,8 @@ export const verifyTopup = async (req, res) => {
 	}
 };
 
-// ==================== WITHDRAWALS ====================
+// backend/controllers/anchorWalletController.js - Updated withdrawToBank
 
-/**
- * Withdraw to bank account
- */
 export const withdrawToBank = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -896,6 +899,7 @@ export const withdrawToBank = async (req, res) => {
 
 		const reference = `WITHDRAW_${Date.now()}_${userId.toString().slice(-6)}`;
 
+		// ✅ Create transaction with valid enum values
 		const transaction = await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: wallet.anchorCustomerId,
@@ -903,11 +907,11 @@ export const withdrawToBank = async (req, res) => {
 			amount,
 			currency: "NGN",
 			type: "debit",
-			category: "withdrawal",
+			category: "withdrawal", // Valid enum value
 			status: "success",
 			description: `Withdrawal to bank account`,
-			source: "wallet",
-			destination: "bank",
+			source: "wallet", // Valid enum value
+			destination: "external_bank", // Valid enum value
 			metadata: {
 				bankAccountId,
 				reference,
@@ -942,7 +946,6 @@ export const withdrawToBank = async (req, res) => {
 		res.status(500).json({ error: error.message });
 	}
 };
-
 // ==================== TRANSACTIONS ====================
 
 /**
