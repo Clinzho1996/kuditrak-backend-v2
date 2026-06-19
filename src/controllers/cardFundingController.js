@@ -5,21 +5,27 @@ import BridgecardCard from "../models/BridgecardCard.js";
 import bridgecardService from "../services/bridgecardService.js";
 import { sendPushToUser } from "../services/pushService.js";
 
-/**
- * Get current USD/NGN exchange rate from Bridgecard
- */
+// backend/controllers/cardFundingController.js - Add test function
+
+export const testExchangeRateRoute = async (req, res) => {
+	console.log("🔵 Test route hit!");
+	res.json({
+		success: true,
+		message: "Exchange rate route is working",
+		timestamp: new Date().toISOString(),
+	});
+};
 export const getExchangeRate = async (req, res) => {
 	try {
 		console.log("🔵 Fetching exchange rate...");
 
-		// Fetch rate from Bridgecard
-		const result = await bridgecardService.getFxRateWithCache();
+		// Directly call the Bridgecard API without cache first
+		const result = await bridgecardService.getFxRate();
 
-		console.log("📊 Bridgecard FX Response:", JSON.stringify(result, null, 2));
+		console.log("📊 Full result:", JSON.stringify(result, null, 2));
 
 		if (!result.success) {
 			console.log("⚠️ Bridgecard FX rate failed, using fallback");
-			// Fallback to config if Bridgecard fails
 			const fallbackRate = process.env.USD_NGN_RATE || 1600;
 			return res.status(200).json({
 				success: true,
@@ -30,23 +36,15 @@ export const getExchangeRate = async (req, res) => {
 			});
 		}
 
-		// Bridgecard returns rate as { "NGN-USD": 74100 }
-		// This is in kobo (100 kobo = 1 NGN)
-		let rate = 1600; // Default fallback
+		// Bridgecard returns { "NGN-USD": 139230 }
+		const rateValue = result.rate ? Object.values(result.rate)[0] : 0;
+		console.log(`📊 Raw FX Rate value: ${rateValue}`);
 
-		if (result.rate) {
-			const rateValue = Object.values(result.rate)[0] || 0;
-			console.log(`📊 Raw FX Rate value: ${rateValue}`);
+		// Convert from kobo (100 kobo = 1 NGN)
+		// If rateValue is 139230, then 1 USD = 1,392.30 NGN
+		let rate = rateValue / 100;
 
-			// If rate is > 1000, it's likely in kobo (e.g., 74100 kobo = 741 NGN)
-			if (rateValue > 1000) {
-				rate = rateValue / 100; // Convert kobo to NGN
-			} else {
-				rate = rateValue;
-			}
-		}
-
-		// Add your markup (e.g., 2%)
+		// Add 2% markup
 		const markup = 0.02;
 		const finalRate = rate * (1 + markup);
 
@@ -63,8 +61,6 @@ export const getExchangeRate = async (req, res) => {
 		});
 	} catch (error) {
 		console.error("❌ Get exchange rate error:", error);
-
-		// Return fallback rate
 		const fallbackRate = process.env.USD_NGN_RATE || 1600;
 		res.status(200).json({
 			success: true,

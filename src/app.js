@@ -112,6 +112,7 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/webhooks", webhookRoutes);
 app.use("/api/anchor/customers", anchorCustomerRoutes);
 app.use("/api/cards", cardRoutes);
+app.use("/api/anchor/wallets", anchorWalletRoutes);
 app.use("/api/anchor/cards", anchorCardRoutes);
 app.use("/api/anchor/accounts", anchorVirtualAccountRoutes);
 

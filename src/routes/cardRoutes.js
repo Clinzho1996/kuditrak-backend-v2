@@ -25,6 +25,11 @@ import protect from "../middleware/auth.js";
 
 const router = express.Router();
 
+// ============= PUBLIC ROUTES (NO AUTH) =============
+// ✅ Exchange rate - public endpoint
+router.get("/exchange-rate", getExchangeRate);
+
+// ============= PROTECTED ROUTES (AUTH REQUIRED) =============
 router.use(protect);
 
 // Card creation flow
@@ -42,9 +47,7 @@ router.put("/:cardId/budget", updateCardBudget);
 // Card funding
 router.post("/fund", fundCard);
 router.post("/unload", unloadCard);
-
 router.post("/fund-from-wallet", fundUSDCardFromWallet);
-router.get("/exchange-rate", getExchangeRate);
 
 // Card controls
 router.post("/:cardId/freeze", freezeCard);

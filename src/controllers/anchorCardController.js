@@ -165,7 +165,6 @@ export const getUserCards = async (req, res) => {
 /**
  * Get card details
  */
-// backend/controllers/anchorCardController.js - Updated getCardDetails
 
 export const getCardDetails = async (req, res) => {
 	try {
@@ -219,7 +218,6 @@ export const getCardDetails = async (req, res) => {
 /**
  * Freeze/unfreeze card
  */
-// backend/controllers/anchorCardController.js - Updated toggleCardStatus and cancelCard
 
 export const toggleCardStatus = async (req, res) => {
 	try {
