@@ -17,6 +17,10 @@ import {
 	updateCardBudget,
 	updateCardPin,
 } from "../controllers/cardCreationController.js";
+import {
+	fundUSDCardFromWallet,
+	getExchangeRate,
+} from "../controllers/cardFundingController.js";
 import protect from "../middleware/auth.js";
 
 const router = express.Router();
@@ -38,6 +42,9 @@ router.put("/:cardId/budget", updateCardBudget);
 // Card funding
 router.post("/fund", fundCard);
 router.post("/unload", unloadCard);
+
+router.post("/fund-from-wallet", fundUSDCardFromWallet);
+router.get("/exchange-rate", getExchangeRate);
 
 // Card controls
 router.post("/:cardId/freeze", freezeCard);

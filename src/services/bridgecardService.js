@@ -1616,6 +1616,77 @@ export const updateCardPin = async (cardId, pin) => {
 	}
 };
 
+// backend/services/bridgecardService.js - Add FX rate function
+
+// ==================== FX RATE ====================
+
+/**
+ * Get FX rate from Bridgecard
+ * Returns the rate at which Bridgecard performs trades from local currencies to USD
+ * Rate limited: once every minute
+ */
+export const getFxRate = async () => {
+	try {
+		const response = await bridgecardApi.get("/cards/fx-rate");
+
+		if (response.data?.status === "success") {
+			console.log("✅ FX Rate fetched:", response.data.data);
+			return {
+				success: true,
+				rate: response.data.data,
+				message: response.data.message,
+			};
+		}
+
+		return {
+			success: false,
+			error: response.data?.message || "Failed to fetch FX rate",
+		};
+	} catch (error) {
+		console.error("❌ Get FX rate error:");
+		if (error.response) {
+			console.error("Status:", error.response.status);
+			console.error("Data:", JSON.stringify(error.response.data, null, 2));
+		}
+		return handleBridgecardError(error);
+	}
+};
+
+/**
+ * Get FX rate with caching (to respect rate limit)
+ */
+let cachedFxRate = null;
+let cachedFxRateTime = 0;
+const FX_RATE_CACHE_DURATION = 60000; // 60 seconds (respects 1/min limit)
+
+export const getFxRateWithCache = async (forceRefresh = false) => {
+	const now = Date.now();
+
+	// Return cached rate if still valid
+	if (
+		!forceRefresh &&
+		cachedFxRate &&
+		now - cachedFxRateTime < FX_RATE_CACHE_DURATION
+	) {
+		console.log("📦 Using cached FX rate:", cachedFxRate);
+		return {
+			success: true,
+			rate: cachedFxRate,
+			cached: true,
+		};
+	}
+
+	// Fetch fresh rate
+	const result = await getFxRate();
+
+	if (result.success) {
+		cachedFxRate = result.rate;
+		cachedFxRateTime = now;
+	}
+
+	return result;
+};
+
 // Update the export
 export default {
 	// Cardholder
@@ -1643,6 +1714,8 @@ export default {
 	createNGNCard,
 	fundNGNCard,
 	unloadNGNCard,
+	getFxRateWithCache,
+	getFxRate,
 	fundCard,
 	unloadCard,
 	mockDebitTransaction,
