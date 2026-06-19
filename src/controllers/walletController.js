@@ -1,5 +1,6 @@
 // backend/controllers/walletController.js
 import AnchorCustomer from "../models/AnchorCustomer.js";
+import AnchorTransaction from "../models/AnchorTransaction.js";
 import AnchorVirtualAccount from "../models/AnchorVirtualAccount.js";
 import AnchorWallet from "../models/AnchorWallet.js";
 import { getOrCreateAnchorCustomer } from "../services/anchorCustomerService.js";
@@ -16,7 +17,10 @@ export const getBalance = async (req, res) => {
 		// Ensure Anchor customer exists
 		const customerResult = await getOrCreateAnchorCustomer(userId);
 		if (!customerResult.success) {
-			return res.status(400).json({ error: customerResult.error });
+			return res.status(400).json({
+				success: false,
+				error: customerResult.error,
+			});
 		}
 
 		// Get user's main wallet
@@ -43,6 +47,9 @@ export const getBalance = async (req, res) => {
 			isActive: true,
 		});
 
+		// Get USD balance from Bridgecard cards
+		const usdBalance = await getUSDBalance(userId);
+
 		const responseData = {
 			success: true,
 			balance: balanceResponse.success
@@ -51,9 +58,12 @@ export const getBalance = async (req, res) => {
 			available: balanceResponse.success
 				? balanceResponse.balance
 				: wallet.balance,
-			currency: balanceResponse.success
-				? balanceResponse.currency
-				: wallet.currency,
+			designatedFunds: 0,
+			ngnBalance: balanceResponse.success
+				? balanceResponse.balance
+				: wallet.balance,
+			usdBalance: usdBalance,
+			currency: "NGN",
 			walletId: wallet.walletId,
 			walletName: wallet.name,
 			accountNumber: virtualAccounts[0]?.accountNumber || null,
@@ -70,7 +80,10 @@ export const getBalance = async (req, res) => {
 		res.status(200).json(responseData);
 	} catch (error) {
 		console.error("Get balance error:", error);
-		res.status(500).json({ error: error.message });
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
 	}
 };
 
@@ -102,18 +115,22 @@ export const refreshBalance = async (req, res) => {
 			await wallet.save();
 		}
 
+		const usdBalance = await getUSDBalance(userId);
+
 		res.status(200).json({
 			success: true,
 			balance: balanceResponse.success
 				? balanceResponse.balance
 				: wallet.balance,
-			currency: balanceResponse.success
-				? balanceResponse.currency
-				: wallet.currency,
+			usdBalance: usdBalance,
+			currency: "NGN",
 		});
 	} catch (error) {
 		console.error("Refresh balance error:", error);
-		res.status(500).json({ error: error.message });
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
 	}
 };
 
@@ -123,29 +140,19 @@ export const refreshBalance = async (req, res) => {
 export const getUSDWalletBalance = async (req, res) => {
 	try {
 		const userId = req.user._id;
-
-		// For now, return USD balance from Bridgecard integration
-		// This would be enhanced when Anchor supports USD wallets
-		const usdCards = await BridgecardCard.find({
-			userId,
-			currency: "USD",
-			status: "active",
-		});
-
-		const totalUSDBalance = usdCards.reduce(
-			(sum, card) => sum + (card.balance || 0),
-			0,
-		);
+		const usdBalance = await getUSDBalance(userId);
 
 		res.status(200).json({
 			success: true,
-			balance: totalUSDBalance,
+			balance: usdBalance,
 			currency: "USD",
-			cards: usdCards.length,
 		});
 	} catch (error) {
 		console.error("Get USD balance error:", error);
-		res.status(500).json({ error: error.message });
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
 	}
 };
 
@@ -182,7 +189,74 @@ export const getNGNWalletBalance = async (req, res) => {
 		});
 	} catch (error) {
 		console.error("Get NGN balance error:", error);
-		res.status(500).json({ error: error.message });
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
+/**
+ * Get USD balance from Bridgecard cards
+ */
+const getUSDBalance = async (userId) => {
+	try {
+		// Import BridgecardCard model
+		const BridgecardCard = await import("../models/BridgecardCard.js").then(
+			(m) => m.default,
+		);
+
+		const usdCards = await BridgecardCard.find({
+			userId,
+			currency: "USD",
+			status: "active",
+		});
+
+		const totalUSDBalance = usdCards.reduce(
+			(sum, card) => sum + (card.balance || 0),
+			0,
+		);
+		return totalUSDBalance;
+	} catch (error) {
+		console.error("Error getting USD balance:", error);
+		return 0;
+	}
+};
+
+/**
+ * List all virtual accounts
+ */
+export const listVirtualAccounts = async (req, res) => {
+	try {
+		const userId = req.user._id;
+
+		const virtualAccounts = await AnchorVirtualAccount.find({
+			userId,
+			isActive: true,
+		});
+
+		const formattedAccounts = virtualAccounts.map((acc) => ({
+			id: acc._id,
+			accountNumber: acc.accountNumber,
+			bankName: acc.bankName,
+			accountName: acc.accountName,
+			provider: acc.provider || "anchor",
+			currency: acc.currency || "NGN",
+			isActive: acc.isActive,
+			isMock: acc.isMock || false,
+		}));
+
+		res.status(200).json({
+			success: true,
+			accounts: formattedAccounts,
+			count: formattedAccounts.length,
+		});
+	} catch (error) {
+		console.error("List virtual accounts error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
 	}
 };
 
@@ -202,10 +276,11 @@ export const getVirtualAccount = async (req, res) => {
 			});
 		}
 
-		// Check if user already has a virtual account
+		// Check if user already has a virtual account for this currency
 		let virtualAccount = await AnchorVirtualAccount.findOne({
 			userId,
 			isActive: true,
+			currency: currency,
 		});
 
 		if (virtualAccount) {
@@ -214,7 +289,7 @@ export const getVirtualAccount = async (req, res) => {
 				accountNumber: virtualAccount.accountNumber,
 				bankName: virtualAccount.bankName,
 				accountName: virtualAccount.accountName,
-				provider: virtualAccount.provider,
+				provider: virtualAccount.provider || "anchor",
 				currency: currency,
 				isMock: virtualAccount.isMock || false,
 			});
@@ -244,6 +319,7 @@ export const getVirtualAccount = async (req, res) => {
 				isActive: true,
 				isMock: true,
 				provider: "anchor",
+				currency: currency,
 			});
 
 			return res.status(201).json({
@@ -278,15 +354,17 @@ export const getVirtualAccount = async (req, res) => {
 			isActive: true,
 			isMock: false,
 			provider: "anchor",
+			currency: currency,
 		});
 
 		await sendPushToUser(
 			userId,
 			"🏦 Virtual Account Created",
-			`Your virtual account ${virtualAccount.accountNumber} is ready to receive money.`,
+			`Your ${currency} virtual account ${virtualAccount.accountNumber} is ready to receive money.`,
 			{
 				type: "virtual_account_created",
 				accountNumber: virtualAccount.accountNumber,
+				currency: currency,
 			},
 		);
 
@@ -301,41 +379,10 @@ export const getVirtualAccount = async (req, res) => {
 		});
 	} catch (error) {
 		console.error("Get virtual account error:", error);
-		res.status(500).json({ error: error.message });
-	}
-};
-
-/**
- * List all virtual accounts
- */
-export const listVirtualAccounts = async (req, res) => {
-	try {
-		const userId = req.user._id;
-
-		const virtualAccounts = await AnchorVirtualAccount.find({
-			userId,
-			isActive: true,
+		res.status(500).json({
+			success: false,
+			error: error.message,
 		});
-
-		const formattedAccounts = virtualAccounts.map((acc) => ({
-			id: acc._id,
-			accountNumber: acc.accountNumber,
-			bankName: acc.bankName,
-			accountName: acc.accountName,
-			provider: acc.provider || "anchor",
-			currency: acc.currency || "NGN",
-			isActive: acc.isActive,
-			isMock: acc.isMock || false,
-		}));
-
-		res.status(200).json({
-			success: true,
-			accounts: formattedAccounts,
-			count: formattedAccounts.length,
-		});
-	} catch (error) {
-		console.error("List virtual accounts error:", error);
-		res.status(500).json({ error: error.message });
 	}
 };
 
@@ -382,9 +429,13 @@ export const topupWallet = async (req, res) => {
 			destination: "wallet",
 		});
 
-		// Generate payment link (mock for now)
+		// Generate payment link (mock for now - integrate with Paystack/Flutterwave)
 		const paymentLink = `https://pay.kuditrak.com/topup/${transaction._id}`;
 		const reference = `TOPUP_${Date.now()}_${userId.toString().slice(-6)}`;
+
+		// Update transaction with reference
+		transaction.metadata = { reference, paymentLink };
+		await transaction.save();
 
 		res.status(200).json({
 			success: true,
@@ -396,7 +447,10 @@ export const topupWallet = async (req, res) => {
 		});
 	} catch (error) {
 		console.error("Topup wallet error:", error);
-		res.status(500).json({ error: error.message });
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
 	}
 };
 
@@ -418,7 +472,7 @@ export const verifyTopup = async (req, res) => {
 		// Find transaction
 		const transaction = await AnchorTransaction.findOne({
 			userId,
-			metadata: { reference },
+			"metadata.reference": reference,
 		});
 
 		if (!transaction) {
@@ -439,6 +493,17 @@ export const verifyTopup = async (req, res) => {
 			await wallet.save();
 		}
 
+		await sendPushToUser(
+			userId,
+			"💰 Wallet Funded",
+			`${transaction.currency} ${transaction.amount.toLocaleString()} has been added to your wallet.`,
+			{
+				type: "wallet_funded",
+				amount: transaction.amount,
+				currency: transaction.currency,
+			},
+		);
+
 		res.status(200).json({
 			success: true,
 			message: "Payment verified successfully",
@@ -446,6 +511,183 @@ export const verifyTopup = async (req, res) => {
 		});
 	} catch (error) {
 		console.error("Verify topup error:", error);
-		res.status(500).json({ error: error.message });
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
+/**
+ * Get wallet transactions (from Anchor)
+ */
+export const getWalletTransactions = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { limit = 50, offset = 0 } = req.query;
+
+		const transactions = await AnchorTransaction.find({ userId })
+			.sort({ createdAt: -1 })
+			.limit(parseInt(limit))
+			.skip(parseInt(offset))
+			.lean();
+
+		const total = await AnchorTransaction.countDocuments({ userId });
+
+		res.status(200).json({
+			success: true,
+			transactions,
+			pagination: {
+				limit: parseInt(limit),
+				offset: parseInt(offset),
+				total,
+				hasMore: offset + limit < total,
+			},
+		});
+	} catch (error) {
+		console.error("Get wallet transactions error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
+/**
+ * Create deposit account (virtual account)
+ */
+export const createDepositAccount = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const {
+			productName = "SAVINGS",
+			currency = "NGN",
+			metadata = {},
+		} = req.body;
+
+		const anchorCustomer = await AnchorCustomer.findOne({ userId });
+		if (!anchorCustomer) {
+			return res.status(404).json({
+				success: false,
+				error: "Anchor customer not found. Please complete KYC first.",
+			});
+		}
+
+		if (anchorCustomer.kycLevel === "TIER_0") {
+			return res.status(403).json({
+				success: false,
+				error: "KYC verification required to create deposit account",
+			});
+		}
+
+		const accountResponse = await anchorService.createDepositAccount(
+			anchorCustomer.anchorCustomerId,
+			productName,
+			{
+				userId: userId.toString(),
+				platform: "kuditrak",
+				currency,
+				...metadata,
+			},
+		);
+
+		if (!accountResponse.success) {
+			return res.status(400).json({
+				success: false,
+				error: accountResponse.error,
+			});
+		}
+
+		const accountNumberResponse = await anchorService.getAccountNumber(
+			accountResponse.accountId,
+		);
+
+		const virtualAccount = await AnchorVirtualAccount.create({
+			userId,
+			anchorCustomerId: anchorCustomer.anchorCustomerId,
+			walletId: null,
+			accountNumber: accountNumberResponse.success
+				? accountNumberResponse.accountNumber
+				: "pending",
+			bankName: accountNumberResponse.success
+				? accountNumberResponse.bankName
+				: "Anchor Bank",
+			bankCode: "000",
+			accountName: req.user.fullName,
+			anchorReference: accountResponse.accountId,
+			isActive: true,
+			isMock: false,
+			provider: "anchor",
+			currency: currency,
+		});
+
+		res.status(201).json({
+			success: true,
+			accountNumber: virtualAccount.accountNumber,
+			bankName: virtualAccount.bankName,
+			accountName: virtualAccount.accountName,
+			provider: virtualAccount.provider,
+			currency: currency,
+			isActive: true,
+		});
+	} catch (error) {
+		console.error("Create deposit account error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
+/**
+ * Get account transactions
+ */
+export const getAccountTransactions = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { limit = 50, offset = 0 } = req.query;
+
+		const virtualAccount = await AnchorVirtualAccount.findOne({
+			userId,
+			isActive: true,
+		});
+
+		if (!virtualAccount) {
+			return res.status(404).json({
+				success: false,
+				error: "No virtual account found",
+			});
+		}
+
+		const transactions = await AnchorTransaction.find({
+			userId,
+			virtualAccountId: virtualAccount._id,
+		})
+			.sort({ createdAt: -1 })
+			.limit(parseInt(limit))
+			.skip(parseInt(offset))
+			.lean();
+
+		const total = await AnchorTransaction.countDocuments({
+			userId,
+			virtualAccountId: virtualAccount._id,
+		});
+
+		res.status(200).json({
+			success: true,
+			transactions,
+			pagination: {
+				limit: parseInt(limit),
+				offset: parseInt(offset),
+				total,
+				hasMore: offset + limit < total,
+			},
+		});
+	} catch (error) {
+		console.error("Get account transactions error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
 	}
 };
