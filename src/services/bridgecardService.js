@@ -184,12 +184,22 @@ export const getIssuingWalletBalance = async (currency = "USD") => {
 	}
 };
 
+// backend/services/bridgecardService.js - Updated registerCardholderSync
+
 export const registerCardholderSync = async (cardholderData) => {
 	try {
+		console.log(
+			"📤 Registering cardholder with data:",
+			JSON.stringify(cardholderData, null, 2),
+		);
+
 		const response = await bridgecardApi.post(
 			"/cardholder/register_cardholder_synchronously",
 			cardholderData,
+			{ timeout: 120000 }, // 120 seconds timeout for sync KYC
 		);
+
+		console.log("📥 Register cardholder response:", response.data);
 
 		if (response.data?.status === "success") {
 			return {
@@ -203,8 +213,21 @@ export const registerCardholderSync = async (cardholderData) => {
 		return {
 			success: false,
 			error: response.data?.message || "Registration failed",
+			statusCode: response.status,
+			details: response.data,
 		};
 	} catch (error) {
+		console.error("❌ Register cardholder error:");
+		if (error.response) {
+			console.error("Status:", error.response.status);
+			console.error("Data:", JSON.stringify(error.response.data, null, 2));
+			return {
+				success: false,
+				error: error.response.data?.message || "Bridgecard API error",
+				statusCode: error.response.status,
+				details: error.response.data,
+			};
+		}
 		return handleBridgecardError(error);
 	}
 };

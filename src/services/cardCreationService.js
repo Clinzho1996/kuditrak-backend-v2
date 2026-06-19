@@ -207,46 +207,126 @@ export const processCardCreation = async (requestId) => {
 	}
 };
 
+// backend/services/cardCreationService.js - Complete createBridgecardCard
+
+/**
+ * Create Bridgecard USD Card with category & budget links
+ */
 const createBridgecardCard = async (userId, cardRequest) => {
 	try {
 		console.log("🔵 createBridgecardCard called for user:", userId);
-		console.log("📊 Card Request:", cardRequest);
+		console.log("📊 Card Request:", {
+			cardName: cardRequest.cardDetails?.cardName,
+			cardType: cardRequest.cardDetails?.cardType,
+			currency: cardRequest.cardDetails?.currency,
+			spendingLimit: cardRequest.cardDetails?.spendingLimit,
+			budgetCategory: cardRequest.cardDetails?.budgetCategory,
+		});
+
+		// Get user details
+		const user = await User.findById(userId);
+		if (!user) {
+			console.error("❌ User not found:", userId);
+			return { success: false, error: "User not found" };
+		}
 
 		// Get or create cardholder
 		let cardholder = await BridgecardCardholder.findOne({ userId });
-		console.log("📊 Existing cardholder:", cardholder);
+		console.log(
+			"📊 Existing cardholder:",
+			cardholder ? cardholder.cardholderId : "None",
+		);
 
 		if (!cardholder) {
 			console.log("🔄 No cardholder found, registering...");
-			const user = await User.findById(userId);
 
-			console.log("👤 User data:", {
-				fullName: user.fullName,
-				email: user.email,
-				phone: user.phoneNumber,
-				kyc: user.kyc,
-			});
+			// Format phone number correctly (E.164 format)
+			const phoneNumber = bridgecardService.formatPhoneNumber(
+				user.phoneNumber || "08000000000",
+			);
+			console.log("📊 Phone number:", phoneNumber);
 
-			const registerResult = await bridgecardService.registerCardholderSync({
-				first_name: user.fullName.split(" ")[0],
-				last_name: user.fullName.split(" ").slice(1).join(" ") || user.fullName,
-				email: user.email,
-				phone: bridgecardService.formatPhoneNumber(
-					user.phoneNumber || "08000000000",
-				),
-				address: {
-					address: user.kyc?.address?.street || "Unknown Street",
-					city: user.kyc?.address?.city || "Lagos",
-					state: user.kyc?.address?.state || "Lagos",
-					country: "Nigeria",
-					postal_code: user.kyc?.address?.postalCode || "1000242",
-					house_no: "1",
+			// Format address correctly
+			const address = {
+				address: user.kyc?.address?.street || "9 Jibowu Street",
+				city: user.kyc?.address?.city || "Aba North",
+				state: user.kyc?.address?.state || "Abia",
+				country: "Nigeria",
+				postal_code: user.kyc?.address?.postalCode || "1000242",
+				house_no: "13",
+			};
+			console.log("📊 Address:", address);
+
+			// Format BVN for Bridgecard (needs 12 digits)
+			let bvnForBridgecard = "222222222222"; // Default test BVN
+			if (user.kyc?.bvn) {
+				// Bridgecard expects 12 digits, pad with leading zeros if needed
+				bvnForBridgecard = user.kyc.bvn.padStart(12, "0");
+				// If still not 12 digits, use the last 12 characters
+				if (bvnForBridgecard.length > 12) {
+					bvnForBridgecard = bvnForBridgecard.slice(-12);
+				}
+			}
+			console.log("📊 BVN for Bridgecard:", bvnForBridgecard);
+
+			// ✅ CORRECT identity object format for Bridgecard
+			// Option 1: Use BVN verification (most common)
+			const identity = {
+				id_type: "NIGERIAN_BVN_VERIFICATION",
+				bvn: bvnForBridgecard,
+				selfie_image: user.profileImage || "https://example.com/selfie.jpg",
+			};
+
+			// Option 2: If user has NIN, use that instead (more reliable)
+			if (
+				user.kyc?.identification?.number &&
+				user.kyc.identification.type === "nin"
+			) {
+				console.log("📊 Using NIN instead of BVN");
+				identity.id_type = "NIGERIAN_NIN";
+				identity.id_no = user.kyc.identification.number;
+				identity.id_image =
+					user.kyc.identification.imageUrl || "https://example.com/id.jpg";
+				identity.bvn = bvnForBridgecard; // Still include BVN for verification
+			}
+
+			console.log("📊 Identity object:", JSON.stringify(identity, null, 2));
+
+			// Split full name
+			const nameParts = user.fullName.trim().split(/\s+/);
+			const firstName = nameParts[0] || "John";
+			const lastName = nameParts.slice(1).join(" ") || "Doe";
+
+			// ✅ CORRECT payload for Bridgecard cardholder registration
+			const cardholderData = {
+				first_name: firstName,
+				last_name: lastName,
+				address: address,
+				phone: phoneNumber,
+				email_address: user.email,
+				identity: identity,
+				meta_data: {
+					userId: user._id.toString(),
+					platform: "kuditrak",
+					registrationType: "card_creation",
 				},
-				identity: {
-					id_type: "NIGERIAN_BVN_VERIFICATION",
-					bvn: user.kyc?.bvn || "22222222222222",
-				},
-			});
+			};
+
+			console.log(
+				"📊 Full cardholder data:",
+				JSON.stringify(cardholderData, null, 2),
+			);
+
+			// Try synchronous registration first
+			let registerResult =
+				await bridgecardService.registerCardholderSync(cardholderData);
+
+			// If sync fails with 422, try async
+			if (!registerResult.success && registerResult.statusCode === 422) {
+				console.log("🔄 Sync registration failed, trying async...");
+				registerResult =
+					await bridgecardService.registerCardholderAsync(cardholderData);
+			}
 
 			console.log("📊 Register result:", registerResult);
 
@@ -255,14 +335,42 @@ const createBridgecardCard = async (userId, cardRequest) => {
 					"❌ Failed to register cardholder:",
 					registerResult.error,
 				);
+				console.error("❌ Details:", registerResult.details);
+
+				// Check if it's a verification issue
+				if (registerResult.statusCode === 422) {
+					return {
+						success: false,
+						error:
+							"Cardholder registration failed. Please ensure KYC information is correct.",
+						details: registerResult.details,
+						requiresManualVerification: true,
+					};
+				}
+
 				return {
 					success: false,
 					error: "Failed to register cardholder: " + registerResult.error,
+					details: registerResult.details,
 				};
 			}
 
 			console.log("✅ Cardholder registered:", registerResult.cardholderId);
-			cardholder = await BridgecardCardholder.findOne({ userId });
+
+			// Save cardholder to database
+			cardholder = await BridgecardCardholder.create({
+				userId: user._id,
+				cardholderId: registerResult.cardholderId,
+				isActive: false,
+				isIdVerified: false,
+				bridgecardData: registerResult.data || {},
+				metaData: {
+					registeredAt: new Date(),
+					registrationMethod: "card_creation",
+				},
+			});
+
+			console.log("✅ Cardholder saved to database:", cardholder.cardholderId);
 		}
 
 		if (!cardholder) {
@@ -273,50 +381,72 @@ const createBridgecardCard = async (userId, cardRequest) => {
 			};
 		}
 
-		console.log("📊 Cardholder Status:", {
-			cardholderId: cardholder.cardholderId,
-			isActive: cardholder.isActive,
-			isIdVerified: cardholder.isIdVerified,
-		});
+		// ✅ Refresh cardholder status from Bridgecard
+		console.log("🔄 Refreshing cardholder status...");
+		const cardholderStatus = await bridgecardService.getCardholder(
+			cardholder.cardholderId,
+		);
+
+		if (cardholderStatus.success) {
+			console.log("📊 Cardholder Status from Bridgecard:", {
+				cardholderId: cardholder.cardholderId,
+				isActive: cardholderStatus.isActive,
+				isIdVerified: cardholderStatus.isIdVerified,
+				cardholder: cardholderStatus.cardholder,
+			});
+
+			// Update local status
+			cardholder.isActive = cardholderStatus.isActive || false;
+			cardholder.isIdVerified = cardholderStatus.isIdVerified || false;
+			cardholder.bridgecardData = cardholderStatus.cardholder || {};
+			await cardholder.save();
+		}
 
 		// Check if cardholder is verified
 		if (!cardholder.isActive || !cardholder.isIdVerified) {
 			console.error("❌ Cardholder not verified");
 			return {
 				success: false,
-				error: "Cardholder not verified. Please complete KYC.",
+				error:
+					"Cardholder not verified. Please complete KYC verification on Bridgecard dashboard.",
 				status: {
 					isActive: cardholder.isActive,
 					isIdVerified: cardholder.isIdVerified,
 				},
+				requiresKYC: true,
+				dashboardUrl: "https://issuecards.api.bridgecard.co/dashboard",
 			};
 		}
 
 		// Get category and budget info
-		const category = await Category.findById(cardRequest.categoryId);
-		const budget = await Budget.findById(cardRequest.budgetId);
+		const category = cardRequest.categoryId
+			? await Category.findById(cardRequest.categoryId)
+			: null;
+		const budget = cardRequest.budgetId
+			? await Budget.findById(cardRequest.budgetId)
+			: null;
 
-		console.log("📊 Category:", category);
-		console.log("📊 Budget:", budget);
+		console.log("📊 Category:", category?.name || "None");
+		console.log("📊 Budget:", budget?.name || "None");
 
-		// Create the card
+		// ✅ Create the card with proper payload
 		const cardData = {
 			cardholderId: cardholder.cardholderId,
-			cardType: cardRequest.cardDetails.cardType,
+			cardType: cardRequest.cardDetails.cardType || "virtual",
 			cardBrand: "Mastercard",
-			cardLimit: "500000",
-			fundingAmount: "300",
+			cardLimit: "500000", // $5,000 limit
+			fundingAmount: "300", // Minimum $3 for $5K limit
 			metadata: {
 				userId: userId.toString(),
-				cardName: cardRequest.cardDetails.cardName,
-				budgetCategory: cardRequest.cardDetails.budgetCategory,
-				spendingLimit: cardRequest.cardDetails.spendingLimit,
+				cardName: cardRequest.cardDetails.cardName || "My Card",
+				budgetCategory: cardRequest.cardDetails.budgetCategory || "other",
+				spendingLimit: cardRequest.cardDetails.spendingLimit || 0,
 				cardRequestId: cardRequest._id.toString(),
-				categoryId: cardRequest.categoryId?.toString(),
-				budgetId: cardRequest.budgetId?.toString(),
-				color: cardRequest.cardDetails.color,
-				dailyLimit: cardRequest.spendingControls.dailyMaximum || 0,
-				alertThreshold: cardRequest.spendingControls.alertThreshold || 75,
+				categoryId: cardRequest.categoryId?.toString() || null,
+				budgetId: cardRequest.budgetId?.toString() || null,
+				color: cardRequest.cardDetails.color || "green",
+				dailyLimit: cardRequest.spendingControls?.dailyMaximum || 0,
+				alertThreshold: cardRequest.spendingControls?.alertThreshold || 75,
 			},
 		};
 
@@ -327,26 +457,105 @@ const createBridgecardCard = async (userId, cardRequest) => {
 
 		const result = await bridgecardService.createUSDCard(cardData);
 
-		console.log("📊 Bridgecard result:", result);
+		console.log("📊 Bridgecard create card result:", result);
 
 		if (!result.success) {
 			console.error("❌ Bridgecard card creation failed:", result.error);
 			console.error("❌ Details:", result.details);
-			return { success: false, error: result.error };
+
+			// If it's a funding issue, try with a different funding amount
+			if (
+				result.error?.includes("funding") ||
+				result.error?.includes("balance")
+			) {
+				console.log("🔄 Retrying with higher funding amount...");
+				cardData.fundingAmount = "500"; // Increase funding amount
+				const retryResult = await bridgecardService.createUSDCard(cardData);
+				if (retryResult.success) {
+					return await saveCardToDatabase(
+						userId,
+						cardholder,
+						retryResult,
+						cardRequest,
+					);
+				}
+			}
+
+			return { success: false, error: result.error, details: result.details };
 		}
+
+		// Save card to database
+		return await saveCardToDatabase(userId, cardholder, result, cardRequest);
+	} catch (error) {
+		console.error("❌ Create Bridgecard card error:", error);
+		console.error("❌ Error stack:", error.stack);
+		return { success: false, error: error.message };
+	}
+};
+
+/**
+ * Helper function to save card to database
+ */
+const saveCardToDatabase = async (userId, cardholder, result, cardRequest) => {
+	try {
+		// Get card details for last4 and expiry
+		const cardDetails = await bridgecardService.getCardDetails(result.cardId);
+		let last4 = "0000";
+		let expiryMonth = "12";
+		let expiryYear = "28";
+
+		if (cardDetails.success && cardDetails.card) {
+			last4 = cardDetails.card.last4 || "0000";
+			expiryMonth = cardDetails.card.expiry_month || "12";
+			expiryYear = cardDetails.card.expiry_year || "28";
+		}
+
+		// Save card to database with all links
+		const newCard = await BridgecardCard.create({
+			userId,
+			cardholderId: cardholder.cardholderId,
+			cardId: result.cardId,
+			currency: "USD",
+			cardType: cardRequest.cardDetails.cardType || "virtual",
+			cardBrand: "mastercard",
+			last4,
+			expiryMonth,
+			expiryYear,
+			cardholderName: cardRequest.cardDetails.cardName || "My Card",
+			status: "active",
+			metaData: {
+				cardName: cardRequest.cardDetails.cardName,
+				budgetCategory: cardRequest.cardDetails.budgetCategory,
+				spendingLimit: cardRequest.cardDetails.spendingLimit,
+				color: cardRequest.cardDetails.color,
+				categoryId: cardRequest.categoryId,
+				budgetId: cardRequest.budgetId,
+				dailyMaximum: cardRequest.spendingControls?.dailyMaximum || 0,
+				alertThreshold: cardRequest.spendingControls?.alertThreshold || 75,
+				transactionAlerts:
+					cardRequest.notifications?.transactionAlerts !== false,
+				limitWarnings: cardRequest.notifications?.limitWarnings !== false,
+				autoRefillAlerts: cardRequest.notifications?.autoRefillAlerts || false,
+				bridgecardData: result.cardDetails || {},
+			},
+			isBridgecardCard: true,
+		});
+
+		console.log("✅ Card saved to database:", newCard.cardId);
 
 		return {
 			success: true,
 			cardId: result.cardId,
 			provider: "bridgecard",
 			card: newCard,
+			details: result.cardDetails,
 		};
-
-		// ... rest of the code
 	} catch (error) {
-		console.error("❌ Create Bridgecard card error:", error);
-		console.error("❌ Error stack:", error.stack);
-		return { success: false, error: error.message };
+		console.error("❌ Failed to save card to database:", error);
+		return {
+			success: false,
+			error: "Card created but failed to save: " + error.message,
+		};
 	}
 };
 
