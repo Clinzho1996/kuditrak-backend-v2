@@ -71,10 +71,8 @@ export const getExchangeRate = async (req, res) => {
 	}
 };
 
-/**
- * Fund USD Card from NGN Wallet
- * Uses Bridgecard's FX rate for conversion
- */
+// backend/controllers/cardFundingController.js - Updated with minimum amount check
+
 export const fundUSDCardFromWallet = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -147,6 +145,33 @@ export const fundUSDCardFromWallet = async (req, res) => {
 		const conversionFee = amountInUSD * 0.01;
 		const finalAmountInUSD = amountInUSD - conversionFee;
 
+		// ✅ Check minimum amount (Bridgecard requires at least $3 or $4 depending on card limit)
+		const MINIMUM_USD_AMOUNT = 3.0; // $3 minimum
+		if (finalAmountInUSD < MINIMUM_USD_AMOUNT) {
+			// Calculate minimum NGN needed
+			const minNGNNeeded = Math.ceil((MINIMUM_USD_AMOUNT * finalRate) / 0.99); // Account for conversion fee
+
+			return res.status(400).json({
+				success: false,
+				error: `Minimum funding amount is $${MINIMUM_USD_AMOUNT.toFixed(2)} (₦${minNGNNeeded.toLocaleString()})`,
+				minimumUSD: MINIMUM_USD_AMOUNT,
+				currentUSD: finalAmountInUSD,
+				minimumNGN: minNGNNeeded,
+				message: `Please enter at least ₦${minNGNNeeded.toLocaleString()} to fund your card.`,
+			});
+		}
+
+		// ✅ Also check maximum limit (optional)
+		const MAXIMUM_USD_AMOUNT = 10000; // $10,000 limit
+		if (finalAmountInUSD > MAXIMUM_USD_AMOUNT) {
+			return res.status(400).json({
+				success: false,
+				error: `Maximum funding amount is $${MAXIMUM_USD_AMOUNT.toFixed(2)}`,
+				maximumUSD: MAXIMUM_USD_AMOUNT,
+				currentUSD: finalAmountInUSD,
+			});
+		}
+
 		console.log("💰 Currency Conversion:", {
 			amountInNGN,
 			fxRate: usdRate,
@@ -176,6 +201,7 @@ export const fundUSDCardFromWallet = async (req, res) => {
 			return res.status(400).json({
 				success: false,
 				error: fundingResult.error || "Failed to fund USD card",
+				details: fundingResult.details,
 			});
 		}
 
