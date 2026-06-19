@@ -8,6 +8,11 @@ import { sendPushToUser } from "../services/pushService.js";
 
 // backend/controllers/walletController.js - Add createWallet function
 
+// backend/controllers/walletController.js - Updated with correct endpoints
+
+/**
+ * Create a wallet (deposit account) for a user
+ */
 export const createWallet = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -39,31 +44,69 @@ export const createWallet = async (req, res) => {
 			});
 		}
 
-		// Create Anchor wallet
-		const walletResponse = await anchorService.createAnchorWallet(
+		// Create deposit account (wallet)
+		const accountResponse = await anchorService.createDepositAccount(
 			customerResult.customerId,
-			"Main Wallet",
-			{ userId: userId.toString(), type: "main" },
+			"SAVINGS",
+			{
+				userId: userId.toString(),
+				platform: "kuditrak",
+				walletType: "main",
+			},
 		);
 
-		if (!walletResponse.success) {
+		if (!accountResponse.success) {
 			return res.status(400).json({
 				success: false,
-				error: walletResponse.error,
+				error: accountResponse.error,
 			});
 		}
 
-		// Save to database
+		// Create virtual NUBAN for the wallet
+		let virtualNuban = null;
+		try {
+			const nubanResponse = await anchorService.createVirtualNuban(
+				accountResponse.accountId,
+				{ userId: userId.toString() },
+			);
+			if (nubanResponse.success) {
+				virtualNuban = nubanResponse;
+				console.log(`✅ Virtual NUBAN created: ${nubanResponse.accountNumber}`);
+			}
+		} catch (nubanError) {
+			console.log("⚠️ Could not create virtual NUBAN:", nubanError.message);
+		}
+
+		// Save wallet to database
 		const wallet = await AnchorWallet.create({
 			userId,
 			anchorCustomerId: customerResult.customerId,
-			walletId: walletResponse.walletId,
+			walletId: accountResponse.accountId,
 			walletType: "main",
 			balance: 0,
 			name: "Main Wallet",
 			currency: "NGN",
 			status: "active",
+			accountNumber: virtualNuban?.accountNumber || null,
+			bankName: virtualNuban?.bankName || null,
 		});
+
+		// Also save virtual account reference
+		if (virtualNuban) {
+			await AnchorVirtualAccount.create({
+				userId,
+				anchorCustomerId: customerResult.customerId,
+				walletId: wallet._id,
+				accountNumber: virtualNuban.accountNumber,
+				bankName: virtualNuban.bankName,
+				accountName: virtualNuban.accountName,
+				bankCode: virtualNuban.bankCode,
+				anchorReference: virtualNuban.virtualNubanId,
+				isActive: true,
+				provider: "anchor",
+				currency: "NGN",
+			});
+		}
 
 		console.log("✅ Wallet created:", wallet.walletId);
 
@@ -77,6 +120,8 @@ export const createWallet = async (req, res) => {
 				balance: wallet.balance,
 				currency: wallet.currency,
 				status: wallet.status,
+				accountNumber: wallet.accountNumber,
+				bankName: wallet.bankName,
 			},
 		});
 	} catch (error) {
@@ -88,6 +133,67 @@ export const createWallet = async (req, res) => {
 	}
 };
 
+/**
+ * Get wallet balance
+ */
+export const getBalance = async (req, res) => {
+	try {
+		const userId = req.user._id;
+
+		const wallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
+
+		if (!wallet) {
+			return res.status(404).json({
+				success: false,
+				error: "Wallet not found",
+			});
+		}
+
+		// Get real-time balance from Anchor
+		const balanceResponse = await anchorService.getDepositAccountBalance(
+			wallet.walletId,
+		);
+
+		// Get virtual accounts for additional info
+		const virtualAccounts = await AnchorVirtualAccount.find({
+			userId,
+			isActive: true,
+		});
+
+		const responseData = {
+			success: true,
+			balance: balanceResponse.success
+				? balanceResponse.balance
+				: wallet.balance,
+			available: balanceResponse.success
+				? balanceResponse.balance
+				: wallet.balance,
+			currency: "NGN",
+			walletId: wallet.walletId,
+			walletName: wallet.name,
+			accountNumber: virtualAccounts[0]?.accountNumber || null,
+			bankName: virtualAccounts[0]?.bankName || null,
+			anchorCustomerId: wallet.anchorCustomerId,
+		};
+
+		// Update local balance
+		if (balanceResponse.success) {
+			wallet.balance = balanceResponse.balance;
+			await wallet.save();
+		}
+
+		res.status(200).json(responseData);
+	} catch (error) {
+		console.error("Get balance error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
 /**
  * Get user's wallet balance
  */
@@ -293,12 +399,10 @@ export const fundSubAccount = async (req, res) => {
 
 		// Check if sub-account is locked
 		if (subAccount.isLocked) {
-			return res
-				.status(400)
-				.json({
-					error:
-						"Sub-account is locked until " + subAccount.lockSettings.unlockDate,
-				});
+			return res.status(400).json({
+				error:
+					"Sub-account is locked until " + subAccount.lockSettings.unlockDate,
+			});
 		}
 
 		// Check if main wallet has sufficient balance
