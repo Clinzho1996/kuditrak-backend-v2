@@ -531,6 +531,8 @@ export const encryptPin = (pin) => {
  */
 // backend/services/bridgecardService.js - Fix createUSDCard
 
+// backend/services/bridgecardService.js - Fixed createUSDCard
+
 export const createUSDCard = async ({
 	cardholderId,
 	cardType = "virtual",
@@ -548,11 +550,11 @@ export const createUSDCard = async ({
 			encryptedPin = encryptPin(pin);
 		}
 
-		// ✅ Build the correct payload format for Bridgecard
+		// ✅ CORRECT payload format for Bridgecard create_card endpoint
 		const payload = {
 			cardholder_id: cardholderId,
 			card_type: cardType,
-			card_brand: "Mastercard", // Bridgecard expects "Mastercard" with capital M
+			card_brand: "Mastercard",
 			card_currency: "USD",
 			card_limit: cardLimit,
 			funding_amount: fundingAmount,
@@ -578,6 +580,7 @@ export const createUSDCard = async ({
 			JSON.stringify(payload, null, 2),
 		);
 
+		// ✅ Make sure we're using the correct endpoint
 		const response = await bridgecardApi.post("/cards/create_card", payload);
 
 		if (response.data?.status === "success") {
@@ -589,34 +592,48 @@ export const createUSDCard = async ({
 			};
 		}
 
-		// ✅ Handle validation errors
+		// ✅ Handle validation errors with more detail
 		if (response.data?.detail) {
 			const errorMessages = response.data.detail
-				.map((d) => d.msg || d)
+				.map((d) => {
+					if (typeof d === "string") return d;
+					return d.msg || d.message || JSON.stringify(d);
+				})
 				.join(", ");
+
 			return {
 				success: false,
 				error:
 					errorMessages || response.data?.message || "Card creation failed",
+				details: response.data.detail,
 			};
 		}
 
 		return {
 			success: false,
 			error: response.data?.message || "Card creation failed",
+			details: response.data,
 		};
 	} catch (error) {
 		console.error("❌ Create USD card error:");
 		if (error.response) {
 			console.error("Status:", error.response.status);
 			console.error("Data:", JSON.stringify(error.response.data, null, 2));
+
+			// ✅ Extract detailed error message
+			let errorMessage = error.response.data?.message || "Card creation failed";
+			if (error.response.data?.detail) {
+				const details = error.response.data.detail
+					.map((d) => d.msg || d)
+					.join(", ");
+				errorMessage = `${errorMessage}: ${details}`;
+			}
+
 			return {
 				success: false,
-				error:
-					error.response.data?.message ||
-					error.response.data?.error ||
-					"Card creation failed",
+				error: errorMessage,
 				details: error.response.data,
+				statusCode: error.response.status,
 			};
 		}
 		return handleBridgecardError(error);
