@@ -532,6 +532,8 @@ export const encryptPin = (pin) => {
 
 // backend/services/bridgecardService.js - Fixed createUSDCard
 
+// backend/services/bridgecardService.js - Add detailed logging
+
 export const createUSDCard = async ({
 	cardholderId,
 	cardType = "virtual",
@@ -543,13 +545,23 @@ export const createUSDCard = async ({
 	metadata = {},
 }) => {
 	try {
+		console.log("🔵 createUSDCard called with:", {
+			cardholderId,
+			cardType,
+			cardBrand,
+			cardLimit,
+			fundingAmount,
+			hasPin: !!pin,
+			metadata,
+		});
+
 		// Encrypt PIN if provided
 		let encryptedPin = null;
 		if (pin) {
 			encryptedPin = encryptPin(pin);
 		}
 
-		// ✅ FIX: Build payload BEFORE logging it
+		// Build payload
 		const payload = {
 			cardholder_id: cardholderId,
 			card_type: cardType,
@@ -564,26 +576,23 @@ export const createUSDCard = async ({
 			},
 		};
 
-		// ✅ Add PIN if provided (must be encrypted)
 		if (encryptedPin) {
 			payload.pin = encryptedPin;
 		}
 
-		// ✅ Add transaction reference if provided
 		if (transactionReference) {
 			payload.transaction_reference = transactionReference;
 		}
 
-		console.log("🔍 Bridgecard Request Details:");
+		console.log("📤 Bridgecard Request:");
 		console.log("URL:", `${BRIDGECARD_BASE_URL}/cards/create_card`);
 		console.log("Payload:", JSON.stringify(payload, null, 2));
-		console.log("Headers:", {
-			token: `Bearer ${BRIDGECARD_TOKEN}`,
-			"Content-Type": "application/json",
-		});
+		console.log("Token exists:", !!BRIDGECARD_TOKEN);
 
-		// ✅ Make sure we're using the correct endpoint
+		// Make the request
 		const response = await bridgecardApi.post("/cards/create_card", payload);
+
+		console.log("✅ Bridgecard Response:", response.data);
 
 		if (response.data?.status === "success") {
 			return {
@@ -594,38 +603,28 @@ export const createUSDCard = async ({
 			};
 		}
 
-		// ✅ Handle validation errors with more detail
-		if (response.data?.detail) {
-			const errorMessages = response.data.detail
-				.map((d) => {
-					if (typeof d === "string") return d;
-					return d.msg || d.message || JSON.stringify(d);
-				})
-				.join(", ");
-
-			return {
-				success: false,
-				error:
-					errorMessages || response.data?.message || "Card creation failed",
-				details: response.data.detail,
-			};
-		}
-
 		return {
 			success: false,
 			error: response.data?.message || "Card creation failed",
 			details: response.data,
 		};
 	} catch (error) {
-		console.error("❌ Create USD card error:");
+		console.error("❌ Bridgecard API Error:");
 		if (error.response) {
 			console.error("Status:", error.response.status);
+			console.error("Headers:", error.response.headers);
 			console.error("Data:", JSON.stringify(error.response.data, null, 2));
 
-			let errorMessage = error.response.data?.message || "Card creation failed";
+			// Extract detailed error message
+			let errorMessage = error.response.data?.message || "Bridgecard API error";
 			if (error.response.data?.detail) {
 				const details = error.response.data.detail
-					.map((d) => d.msg || d)
+					.map((d) => {
+						if (typeof d === "string") return d;
+						if (d.msg) return d.msg;
+						if (d.message) return d.message;
+						return JSON.stringify(d);
+					})
 					.join(", ");
 				errorMessage = `${errorMessage}: ${details}`;
 			}
@@ -637,6 +636,7 @@ export const createUSDCard = async ({
 				statusCode: error.response.status,
 			};
 		}
+		console.error("Error:", error.message);
 		return handleBridgecardError(error);
 	}
 };

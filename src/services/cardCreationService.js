@@ -207,15 +207,26 @@ export const processCardCreation = async (requestId) => {
 	}
 };
 
-/**
- * Create Bridgecard USD Card with category & budget links
- */
 const createBridgecardCard = async (userId, cardRequest) => {
 	try {
+		console.log("🔵 createBridgecardCard called for user:", userId);
+		console.log("📊 Card Request:", cardRequest);
+
 		// Get or create cardholder
 		let cardholder = await BridgecardCardholder.findOne({ userId });
+		console.log("📊 Existing cardholder:", cardholder);
+
 		if (!cardholder) {
+			console.log("🔄 No cardholder found, registering...");
 			const user = await User.findById(userId);
+
+			console.log("👤 User data:", {
+				fullName: user.fullName,
+				email: user.email,
+				phone: user.phoneNumber,
+				kyc: user.kyc,
+			});
+
 			const registerResult = await bridgecardService.registerCardholderSync({
 				first_name: user.fullName.split(" ")[0],
 				last_name: user.fullName.split(" ").slice(1).join(" ") || user.fullName,
@@ -237,24 +248,56 @@ const createBridgecardCard = async (userId, cardRequest) => {
 				},
 			});
 
+			console.log("📊 Register result:", registerResult);
+
 			if (!registerResult.success) {
-				return { success: false, error: "Failed to register cardholder" };
+				console.error(
+					"❌ Failed to register cardholder:",
+					registerResult.error,
+				);
+				return {
+					success: false,
+					error: "Failed to register cardholder: " + registerResult.error,
+				};
 			}
 
+			console.log("✅ Cardholder registered:", registerResult.cardholderId);
 			cardholder = await BridgecardCardholder.findOne({ userId });
 		}
 
+		if (!cardholder) {
+			console.error("❌ Cardholder still not found after registration");
+			return {
+				success: false,
+				error: "Cardholder not found after registration",
+			};
+		}
+
+		console.log("📊 Cardholder Status:", {
+			cardholderId: cardholder.cardholderId,
+			isActive: cardholder.isActive,
+			isIdVerified: cardholder.isIdVerified,
+		});
+
 		// Check if cardholder is verified
 		if (!cardholder.isActive || !cardholder.isIdVerified) {
+			console.error("❌ Cardholder not verified");
 			return {
 				success: false,
 				error: "Cardholder not verified. Please complete KYC.",
+				status: {
+					isActive: cardholder.isActive,
+					isIdVerified: cardholder.isIdVerified,
+				},
 			};
 		}
 
 		// Get category and budget info
 		const category = await Category.findById(cardRequest.categoryId);
 		const budget = await Budget.findById(cardRequest.budgetId);
+
+		console.log("📊 Category:", category);
+		console.log("📊 Budget:", budget);
 
 		// Create the card
 		const cardData = {
@@ -277,40 +320,20 @@ const createBridgecardCard = async (userId, cardRequest) => {
 			},
 		};
 
+		console.log(
+			"📤 Creating USD card with data:",
+			JSON.stringify(cardData, null, 2),
+		);
+
 		const result = await bridgecardService.createUSDCard(cardData);
 
+		console.log("📊 Bridgecard result:", result);
+
 		if (!result.success) {
+			console.error("❌ Bridgecard card creation failed:", result.error);
+			console.error("❌ Details:", result.details);
 			return { success: false, error: result.error };
 		}
-
-		// Save card to database with all links
-		const newCard = await BridgecardCard.create({
-			userId,
-			cardholderId: cardholder.cardholderId,
-			cardId: result.cardId,
-			currency: "USD",
-			cardType: cardRequest.cardDetails.cardType,
-			cardBrand: "mastercard",
-			last4: result.cardDetails?.last4 || "0000",
-			expiryMonth: result.cardDetails?.expiry_month || "12",
-			expiryYear: result.cardDetails?.expiry_year || "28",
-			cardholderName: cardRequest.cardDetails.cardName,
-			status: "active",
-			metaData: {
-				cardName: cardRequest.cardDetails.cardName,
-				budgetCategory: cardRequest.cardDetails.budgetCategory,
-				spendingLimit: cardRequest.cardDetails.spendingLimit,
-				color: cardRequest.cardDetails.color,
-				categoryId: cardRequest.categoryId,
-				budgetId: cardRequest.budgetId,
-				dailyMaximum: cardRequest.spendingControls.dailyMaximum || 0,
-				alertThreshold: cardRequest.spendingControls.alertThreshold || 75,
-				transactionAlerts: cardRequest.notifications.transactionAlerts,
-				limitWarnings: cardRequest.notifications.limitWarnings,
-				autoRefillAlerts: cardRequest.notifications.autoRefillAlerts,
-			},
-			isBridgecardCard: true,
-		});
 
 		return {
 			success: true,
@@ -318,8 +341,11 @@ const createBridgecardCard = async (userId, cardRequest) => {
 			provider: "bridgecard",
 			card: newCard,
 		};
+
+		// ... rest of the code
 	} catch (error) {
-		console.error("Create Bridgecard card error:", error);
+		console.error("❌ Create Bridgecard card error:", error);
+		console.error("❌ Error stack:", error.stack);
 		return { success: false, error: error.message };
 	}
 };
