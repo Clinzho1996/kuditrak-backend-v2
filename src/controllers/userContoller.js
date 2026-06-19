@@ -547,9 +547,24 @@ export const deleteAccount = async (req, res) => {
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
  */
+// backend/controllers/userController.js
+
+/**
+ * Upload ID image for KYC verification
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
 export const uploadIDImage = async (req, res) => {
 	try {
-		const userId = req.user._id;
+		const userId = req.user?._id;
+
+		// Check if user is authenticated
+		if (!userId) {
+			return res.status(401).json({
+				success: false,
+				message: "User not authenticated",
+			});
+		}
 
 		// Check if file was uploaded
 		if (!req.file) {
@@ -586,7 +601,7 @@ export const uploadIDImage = async (req, res) => {
 
 		console.log("✅ ID image uploaded to Cloudinary:", result.secure_url);
 
-		// Save the image URL to user's KYC record (optional)
+		// Save the image URL to user's KYC record
 		const user = await User.findById(userId);
 		if (user) {
 			if (!user.kyc) {
