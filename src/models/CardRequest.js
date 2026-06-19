@@ -1,4 +1,5 @@
-// backend/models/CardRequest.js
+// backend/models/CardRequest.js - Fix the budgetCategory enum
+
 import mongoose from "mongoose";
 
 const cardRequestSchema = new mongoose.Schema({
@@ -7,6 +8,15 @@ const cardRequestSchema = new mongoose.Schema({
 		ref: "User",
 		required: true,
 		index: true,
+	},
+
+	categoryId: {
+		type: mongoose.Schema.Types.ObjectId,
+		ref: "Category",
+	},
+	budgetId: {
+		type: mongoose.Schema.Types.ObjectId,
+		ref: "Budget",
 	},
 
 	// Step 1: Card Details
@@ -33,6 +43,7 @@ const cardRequestSchema = new mongoose.Schema({
 		},
 		budgetCategory: {
 			type: String,
+			// ✅ Fix: Use lowercase values that match your UI
 			enum: [
 				"food",
 				"transport",

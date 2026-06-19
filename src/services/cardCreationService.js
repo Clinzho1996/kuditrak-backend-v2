@@ -12,18 +12,19 @@ import anchorService from "./anchorService.js";
 import bridgecardService from "./bridgecardService.js";
 import { sendPushToUser } from "./pushService.js";
 
-/**
- * Create a card request with full budget & category integration (Step 1)
- */
 export const createCardRequest = async (userId, cardData) => {
 	try {
 		// Ensure user has default categories
 		await initializeDefaultCategories(userId);
 
+		// ✅ Normalize budgetCategory to lowercase
+		const normalizedCategory =
+			cardData.budgetCategory?.toLowerCase() || "other";
+
 		// Find or create the category for this budget
 		let category = await Category.findOne({
 			userId,
-			name: { $regex: new RegExp(`^${cardData.budgetCategory}$`, "i") },
+			name: { $regex: new RegExp(`^${normalizedCategory}$`, "i") },
 		});
 
 		// If category doesn't exist, create it
@@ -41,13 +42,13 @@ export const createCardRequest = async (userId, cardData) => {
 			};
 
 			const categoryInfo =
-				categoryMap[cardData.budgetCategory] || categoryMap["other"];
+				categoryMap[normalizedCategory] || categoryMap["other"];
 
 			category = await Category.create({
 				userId,
 				name: categoryInfo.name,
 				type: categoryInfo.type,
-				keywords: [cardData.budgetCategory],
+				keywords: [normalizedCategory],
 			});
 		}
 
@@ -58,7 +59,6 @@ export const createCardRequest = async (userId, cardData) => {
 		});
 
 		if (!budget) {
-			// Create a budget linked to this card
 			budget = await Budget.create({
 				userId,
 				name: cardData.cardName,
@@ -69,13 +69,12 @@ export const createCardRequest = async (userId, cardData) => {
 				endDate: new Date(new Date().setMonth(new Date().getMonth() + 1)),
 			});
 
-			// Add budget to user's budgets array
 			await User.findByIdAndUpdate(userId, {
 				$push: { budgets: budget._id },
 			});
 		}
 
-		// Create the card request
+		// ✅ Create the card request with normalized budgetCategory
 		const cardRequest = await CardRequest.create({
 			userId,
 			categoryId: category._id,
@@ -85,7 +84,7 @@ export const createCardRequest = async (userId, cardData) => {
 				color: cardData.color || "green",
 				cardName: cardData.cardName,
 				currency: cardData.currency || "USD",
-				budgetCategory: category.name,
+				budgetCategory: normalizedCategory, // ✅ Use normalized lowercase value
 				spendingLimit: cardData.spendingLimit || 0,
 			},
 			spendingControls: {
@@ -562,11 +561,6 @@ export const trackCardSpending = async (userId, cardId, amount, category) => {
 	}
 };
 
-// backend/services/cardCreationService.js - Add this function
-
-/**
- * Get card status by request ID
- */
 export const getCardStatus = async (userId, requestId) => {
 	try {
 		const cardRequest = await CardRequest.findOne({
@@ -601,6 +595,7 @@ export const getCardStatus = async (userId, requestId) => {
 			}
 		}
 
+		// ✅ Format the response with proper category name
 		return {
 			success: true,
 			status: cardRequest.status,
@@ -608,7 +603,16 @@ export const getCardStatus = async (userId, requestId) => {
 				...cardRequest.toObject(),
 				card,
 				budget,
-				category,
+				category: category
+					? {
+							id: category._id,
+							name: category.name,
+							type: category.type,
+						}
+					: null,
+				// ✅ Add display category name
+				displayCategory:
+					category?.name || cardRequest.cardDetails.budgetCategory || "Other",
 			},
 		};
 	} catch (error) {
