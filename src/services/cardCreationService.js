@@ -209,9 +209,8 @@ export const processCardCreation = async (requestId) => {
 
 // backend/services/cardCreationService.js - Complete createBridgecardCard
 
-/**
- * Create Bridgecard USD Card with category & budget links
- */
+// backend/services/cardCreationService.js - Fix createBridgecardCard
+
 const createBridgecardCard = async (userId, cardRequest) => {
 	try {
 		console.log("🔵 createBridgecardCard called for user:", userId);
@@ -257,16 +256,17 @@ const createBridgecardCard = async (userId, cardRequest) => {
 			};
 			console.log("📊 Address:", address);
 
-			// Format BVN for Bridgecard (needs 12 digits)
-			let bvnForBridgecard = "222222222222"; // Default test BVN
-			if (user.kyc?.bvn) {
-				// Bridgecard expects 12 digits, pad with leading zeros if needed
-				bvnForBridgecard = user.kyc.bvn.padStart(12, "0");
-				// If still not 12 digits, use the last 12 characters
-				if (bvnForBridgecard.length > 12) {
-					bvnForBridgecard = bvnForBridgecard.slice(-12);
-				}
+			// ✅ FIX: Use BVN as-is (11 digits) - NO PADDING
+			let bvnForBridgecard = user.kyc?.bvn || "22222222222"; // Default test BVN (11 digits)
+
+			// Ensure it's exactly 11 digits
+			if (bvnForBridgecard.length !== 11) {
+				console.log(
+					`⚠️ BVN length is ${bvnForBridgecard.length}, expected 11. Using default.`,
+				);
+				bvnForBridgecard = "22222222222"; // Bridgecard test BVN
 			}
+
 			console.log("📊 BVN for Bridgecard:", bvnForBridgecard);
 
 			// ✅ CORRECT identity object format for Bridgecard
@@ -287,7 +287,10 @@ const createBridgecardCard = async (userId, cardRequest) => {
 				identity.id_no = user.kyc.identification.number;
 				identity.id_image =
 					user.kyc.identification.imageUrl || "https://example.com/id.jpg";
-				identity.bvn = bvnForBridgecard; // Still include BVN for verification
+				// Still include BVN for verification (11 digits)
+				identity.bvn = bvnForBridgecard;
+				// Remove selfie_image if using NIN
+				delete identity.selfie_image;
 			}
 
 			console.log("📊 Identity object:", JSON.stringify(identity, null, 2));
@@ -317,7 +320,7 @@ const createBridgecardCard = async (userId, cardRequest) => {
 				JSON.stringify(cardholderData, null, 2),
 			);
 
-			// Try synchronous registration first
+			// Try synchronous registration
 			let registerResult =
 				await bridgecardService.registerCardholderSync(cardholderData);
 
@@ -392,7 +395,6 @@ const createBridgecardCard = async (userId, cardRequest) => {
 				cardholderId: cardholder.cardholderId,
 				isActive: cardholderStatus.isActive,
 				isIdVerified: cardholderStatus.isIdVerified,
-				cardholder: cardholderStatus.cardholder,
 			});
 
 			// Update local status
