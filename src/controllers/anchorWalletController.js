@@ -1,10 +1,92 @@
 // backend/controllers/anchorWalletController.js
-import AnchorWallet from "../models/AnchorWallet.js";
 import AnchorSubAccount from "../models/AnchorSubAccount.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
-import anchorService from "../services/anchorService.js";
+import AnchorWallet from "../models/AnchorWallet.js";
 import { getOrCreateAnchorCustomer } from "../services/anchorCustomerService.js";
+import anchorService from "../services/anchorService.js";
 import { sendPushToUser } from "../services/pushService.js";
+
+// backend/controllers/walletController.js - Add createWallet function
+
+export const createWallet = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { currency = "NGN" } = req.body;
+
+		console.log("🔵 Creating wallet for user:", userId);
+
+		// Check if wallet already exists
+		const existingWallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
+
+		if (existingWallet) {
+			console.log("✅ Wallet already exists:", existingWallet.walletId);
+			return res.status(200).json({
+				success: true,
+				message: "Wallet already exists",
+				wallet: existingWallet,
+			});
+		}
+
+		// Ensure Anchor customer exists
+		const customerResult = await getOrCreateAnchorCustomer(userId);
+		if (!customerResult.success) {
+			return res.status(400).json({
+				success: false,
+				error: customerResult.error,
+			});
+		}
+
+		// Create Anchor wallet
+		const walletResponse = await anchorService.createAnchorWallet(
+			customerResult.customerId,
+			"Main Wallet",
+			{ userId: userId.toString(), type: "main" },
+		);
+
+		if (!walletResponse.success) {
+			return res.status(400).json({
+				success: false,
+				error: walletResponse.error,
+			});
+		}
+
+		// Save to database
+		const wallet = await AnchorWallet.create({
+			userId,
+			anchorCustomerId: customerResult.customerId,
+			walletId: walletResponse.walletId,
+			walletType: "main",
+			balance: 0,
+			name: "Main Wallet",
+			currency: "NGN",
+			status: "active",
+		});
+
+		console.log("✅ Wallet created:", wallet.walletId);
+
+		res.status(201).json({
+			success: true,
+			message: "Wallet created successfully",
+			wallet: {
+				id: wallet._id,
+				walletId: wallet.walletId,
+				name: wallet.name,
+				balance: wallet.balance,
+				currency: wallet.currency,
+				status: wallet.status,
+			},
+		});
+	} catch (error) {
+		console.error("Create wallet error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
 
 /**
  * Get user's wallet balance
@@ -30,7 +112,9 @@ export const getWalletBalance = async (req, res) => {
 		}
 
 		// Get real-time balance from Anchor
-		const balanceResponse = await anchorService.getWalletBalance(wallet.walletId);
+		const balanceResponse = await anchorService.getWalletBalance(
+			wallet.walletId,
+		);
 
 		if (balanceResponse.success) {
 			// Update local balance
@@ -102,7 +186,10 @@ export const createSubAccount = async (req, res) => {
 		const { name, type, targetAmount, autoSave, icon, color } = req.body;
 
 		// Get main wallet
-		const mainWallet = await AnchorWallet.findOne({ userId, walletType: "main" });
+		const mainWallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
 		if (!mainWallet) {
 			return res.status(404).json({ error: "Main wallet not found" });
 		}
@@ -134,7 +221,7 @@ export const createSubAccount = async (req, res) => {
 			userId,
 			"🎯 Savings Goal Created!",
 			`You've created a new savings goal: ${name}`,
-			{ type: "sub_account_created", subAccountId: subAccount.subAccountId }
+			{ type: "sub_account_created", subAccountId: subAccount.subAccountId },
 		);
 
 		res.status(201).json({
@@ -160,7 +247,7 @@ export const getSubAccounts = async (req, res) => {
 			.lean();
 
 		// Add virtual isLocked property
-		const processedAccounts = subAccounts.map(account => ({
+		const processedAccounts = subAccounts.map((account) => ({
 			...account,
 			isLocked: account.lockSettings?.enabled
 				? new Date() < new Date(account.lockSettings.unlockDate)
@@ -190,7 +277,10 @@ export const fundSubAccount = async (req, res) => {
 		}
 
 		// Get main wallet
-		const mainWallet = await AnchorWallet.findOne({ userId, walletType: "main" });
+		const mainWallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
 		if (!mainWallet) {
 			return res.status(404).json({ error: "Main wallet not found" });
 		}
@@ -203,11 +293,18 @@ export const fundSubAccount = async (req, res) => {
 
 		// Check if sub-account is locked
 		if (subAccount.isLocked) {
-			return res.status(400).json({ error: "Sub-account is locked until " + subAccount.lockSettings.unlockDate });
+			return res
+				.status(400)
+				.json({
+					error:
+						"Sub-account is locked until " + subAccount.lockSettings.unlockDate,
+				});
 		}
 
 		// Check if main wallet has sufficient balance
-		const balanceResponse = await anchorService.getWalletBalance(mainWallet.walletId);
+		const balanceResponse = await anchorService.getWalletBalance(
+			mainWallet.walletId,
+		);
 		if (!balanceResponse.success || balanceResponse.balance < amount) {
 			return res.status(400).json({ error: "Insufficient balance" });
 		}
@@ -244,7 +341,11 @@ export const fundSubAccount = async (req, res) => {
 			userId,
 			"💰 Sub-Account Funded",
 			`₦${amount.toLocaleString()} added to ${subAccount.name}`,
-			{ type: "sub_account_funded", subAccountId: subAccount.subAccountId, amount }
+			{
+				type: "sub_account_funded",
+				subAccountId: subAccount.subAccountId,
+				amount,
+			},
 		);
 
 		res.status(200).json({
@@ -272,7 +373,10 @@ export const withdrawFromSubAccount = async (req, res) => {
 		}
 
 		// Get main wallet
-		const mainWallet = await AnchorWallet.findOne({ userId, walletType: "main" });
+		const mainWallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
 		if (!mainWallet) {
 			return res.status(404).json({ error: "Main wallet not found" });
 		}
@@ -291,7 +395,9 @@ export const withdrawFromSubAccount = async (req, res) => {
 			const totalDeduction = amount + penalty;
 
 			if (subAccount.balance < totalDeduction) {
-				return res.status(400).json({ error: "Insufficient balance including penalty" });
+				return res
+					.status(400)
+					.json({ error: "Insufficient balance including penalty" });
 			}
 
 			// Deduct penalty
@@ -319,7 +425,7 @@ export const withdrawFromSubAccount = async (req, res) => {
 				userId,
 				"⚠️ Early Withdrawal Penalty Applied",
 				`A 7% penalty (₦${penalty.toLocaleString()}) was applied for early withdrawal from ${subAccount.name}`,
-				{ type: "penalty_applied", subAccountId, penalty }
+				{ type: "penalty_applied", subAccountId, penalty },
 			);
 		} else {
 			// Normal withdrawal
@@ -354,12 +460,18 @@ export const withdrawFromSubAccount = async (req, res) => {
 			userId,
 			"💸 Sub-Account Withdrawal",
 			`₦${amount.toLocaleString()} withdrawn from ${subAccount.name}`,
-			{ type: "sub_account_withdrawn", subAccountId: subAccount.subAccountId, amount }
+			{
+				type: "sub_account_withdrawn",
+				subAccountId: subAccount.subAccountId,
+				amount,
+			},
 		);
 
 		res.status(200).json({
 			success: true,
-			message: subAccount.isLocked ? "Withdrawal completed with penalty" : "Withdrawal successful",
+			message: subAccount.isLocked
+				? "Withdrawal completed with penalty"
+				: "Withdrawal successful",
 			transaction,
 			newBalance: subAccount.balance,
 		});
@@ -397,7 +509,7 @@ export const lockSubAccount = async (req, res) => {
 			userId,
 			"🔒 Sub-Account Locked",
 			`${subAccount.name} is locked until ${new Date(unlockDate).toLocaleDateString()}`,
-			{ type: "sub_account_locked", subAccountId, unlockDate }
+			{ type: "sub_account_locked", subAccountId, unlockDate },
 		);
 
 		res.status(200).json({

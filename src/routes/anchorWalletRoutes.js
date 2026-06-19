@@ -7,6 +7,7 @@ import {
 } from "../controllers/anchorVirtualAccountController.js";
 import {
 	createSubAccount,
+	createWallet,
 	fundSubAccount,
 	getSubAccounts,
 	getWalletTransactions,
@@ -41,6 +42,7 @@ router.post("/virtual-account/create", createDepositAccount);
 router.get("/virtual-account/transactions", getAccountTransactions);
 
 // ================= TOP UP =================
+router.post("/create", createWallet);
 router.post("/topup", topupWallet);
 router.get("/verify", verifyTopup);
 

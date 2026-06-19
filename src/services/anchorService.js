@@ -98,8 +98,8 @@ export const updateCustomer = async (customerId, updateData) => {
 		);
 
 		const response = await makeAnchorRequest(
-			"patch",
-			`/customers/${customerId}`,
+			"put",
+			`/customers/update/${customerId}`,
 			payload,
 		);
 
