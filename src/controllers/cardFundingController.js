@@ -269,29 +269,22 @@ export const fundUSDCardFromWallet = async (req, res) => {
 				balanceErr.message,
 			);
 		}
-
 		res.status(200).json({
 			success: true,
-			message: fundingResult.success
-				? "USD card funding initiated successfully"
-				: "USD card funding failed",
+			message: "USD card funding initiated successfully",
 			data: {
 				cardId: card.cardId,
 				cardLast4: card.last4,
-				amountInNGN,
-				amountInUSD: finalAmountInUSD,
-				amountInCents,
-				fxRate: usdRate,
-				finalRate: finalRate,
-				conversionFee,
-				newCardBalance:
-					updatedBalance || (card.balance || 0) + finalAmountInUSD,
-				newWalletBalance: wallet.balance,
+				amountInNGN: Number(amountInNGN), // Ensure it's a number
+				amountInUSD: Number(finalAmountInUSD), // Ensure it's a number
+				amountInCents: Number(amountInCents),
+				fxRate: Number(usdRate),
+				finalRate: Number(finalRate),
+				conversionFee: Number(conversionFee),
+				newCardBalance: Number(card.balance || 0) + Number(finalAmountInUSD),
+				newWalletBalance: Number(wallet.balance || 0),
 				bridgecardReference: reference,
 				status: fundingResult.status || "pending",
-				ngnTransaction: ngnTransaction._id,
-				usdTransaction: usdTransaction._id,
-				bridgecardResponse: fundingResult,
 			},
 		});
 	} catch (error) {
