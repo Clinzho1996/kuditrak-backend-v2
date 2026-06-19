@@ -529,7 +529,6 @@ export const encryptPin = (pin) => {
  * @param {string} pin - 4-digit PIN (will be encrypted)
  * @param {object} metadata - Additional metadata
  */
-// backend/services/bridgecardService.js - Fix createUSDCard
 
 // backend/services/bridgecardService.js - Fixed createUSDCard
 
@@ -550,16 +549,7 @@ export const createUSDCard = async ({
 			encryptedPin = encryptPin(pin);
 		}
 
-		// In createUSDCard, before making the request:
-		console.log("🔍 Bridgecard Request Details:");
-		console.log("URL:", `${BRIDGECARD_BASE_URL}/cards/create_card`);
-		console.log("Payload:", JSON.stringify(payload, null, 2));
-		console.log("Headers:", {
-			token: `Bearer ${BRIDGECARD_TOKEN}`,
-			"Content-Type": "application/json",
-		});
-
-		// ✅ CORRECT payload format for Bridgecard create_card endpoint
+		// ✅ FIX: Build payload BEFORE logging it
 		const payload = {
 			cardholder_id: cardholderId,
 			card_type: cardType,
@@ -584,10 +574,13 @@ export const createUSDCard = async ({
 			payload.transaction_reference = transactionReference;
 		}
 
-		console.log(
-			"📝 Creating USD card with payload:",
-			JSON.stringify(payload, null, 2),
-		);
+		console.log("🔍 Bridgecard Request Details:");
+		console.log("URL:", `${BRIDGECARD_BASE_URL}/cards/create_card`);
+		console.log("Payload:", JSON.stringify(payload, null, 2));
+		console.log("Headers:", {
+			token: `Bearer ${BRIDGECARD_TOKEN}`,
+			"Content-Type": "application/json",
+		});
 
 		// ✅ Make sure we're using the correct endpoint
 		const response = await bridgecardApi.post("/cards/create_card", payload);
@@ -629,7 +622,6 @@ export const createUSDCard = async ({
 			console.error("Status:", error.response.status);
 			console.error("Data:", JSON.stringify(error.response.data, null, 2));
 
-			// ✅ Extract detailed error message
 			let errorMessage = error.response.data?.message || "Card creation failed";
 			if (error.response.data?.detail) {
 				const details = error.response.data.detail
