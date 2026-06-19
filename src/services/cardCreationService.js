@@ -798,8 +798,12 @@ export const trackCardSpending = async (userId, cardId, amount, category) => {
 	}
 };
 
+// backend/services/cardCreationService.js - Fix getCardStatus
+
 export const getCardStatus = async (userId, requestId) => {
 	try {
+		console.log(`🔍 Getting card status for request: ${requestId}`);
+
 		const cardRequest = await CardRequest.findOne({
 			userId,
 			_id: requestId,
@@ -812,6 +816,8 @@ export const getCardStatus = async (userId, requestId) => {
 			};
 		}
 
+		console.log(`📊 Card request status: ${cardRequest.status}`);
+
 		// Get additional details if completed
 		let card = null;
 		let budget = null;
@@ -823,6 +829,7 @@ export const getCardStatus = async (userId, requestId) => {
 					userId,
 					cardId: cardRequest.bridgecardCardId,
 				});
+				console.log(`✅ Found card: ${card?.cardId}`);
 			}
 			if (cardRequest.budgetId) {
 				budget = await Budget.findById(cardRequest.budgetId);
@@ -832,8 +839,22 @@ export const getCardStatus = async (userId, requestId) => {
 			}
 		}
 
-		// ✅ Format the response with proper category name
-		return {
+		// If status is processing but card exists in Bridgecard, update status
+		if (cardRequest.status === "processing" && cardRequest.bridgecardCardId) {
+			console.log(
+				`🔄 Card exists but status is processing, updating to completed...`,
+			);
+			cardRequest.status = "completed";
+			await cardRequest.save();
+
+			// Fetch the card
+			card = await BridgecardCard.findOne({
+				userId,
+				cardId: cardRequest.bridgecardCardId,
+			});
+		}
+
+		const response = {
 			success: true,
 			status: cardRequest.status,
 			cardRequest: {
@@ -847,11 +868,27 @@ export const getCardStatus = async (userId, requestId) => {
 							type: category.type,
 						}
 					: null,
-				// ✅ Add display category name
 				displayCategory:
 					category?.name || cardRequest.cardDetails.budgetCategory || "Other",
 			},
 		};
+
+		// If completed, include card details
+		if (cardRequest.status === "completed" && card) {
+			response.card = {
+				id: card._id,
+				cardId: card.cardId,
+				last4: card.last4,
+				expiryMonth: card.expiryMonth,
+				expiryYear: card.expiryYear,
+				status: card.status,
+				provider: card.isAnchorCard ? "anchor" : "bridgecard",
+				maskedPan: `**** **** **** ${card.last4}`,
+			};
+		}
+
+		console.log(`📊 Returning status: ${cardRequest.status}`);
+		return response;
 	} catch (error) {
 		console.error("Get card status error:", error);
 		return { success: false, error: error.message };
