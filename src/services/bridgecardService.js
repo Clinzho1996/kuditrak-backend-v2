@@ -550,6 +550,15 @@ export const createUSDCard = async ({
 			encryptedPin = encryptPin(pin);
 		}
 
+		// In createUSDCard, before making the request:
+		console.log("🔍 Bridgecard Request Details:");
+		console.log("URL:", `${BRIDGECARD_BASE_URL}/cards/create_card`);
+		console.log("Payload:", JSON.stringify(payload, null, 2));
+		console.log("Headers:", {
+			token: `Bearer ${BRIDGECARD_TOKEN}`,
+			"Content-Type": "application/json",
+		});
+
 		// ✅ CORRECT payload format for Bridgecard create_card endpoint
 		const payload = {
 			cardholder_id: cardholderId,
