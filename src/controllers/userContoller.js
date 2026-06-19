@@ -13,6 +13,8 @@ import {
 	saveDeviceToken,
 	sendPushToUser,
 } from "../services/pushService.js";
+import BridgecardCardholder from "../models/BridgecardCardholder.js";
+import bridgecardService from "../services/bridgecardService.js";
 
 dotenv.config();
 
@@ -120,13 +122,14 @@ export const updateProfileImage = async (req, res) => {
 	}
 };
 
-// Updated updateKYC function with better flow
+// backend/controllers/userController.js - Updated updateKYC
+
 export const updateKYC = async (req, res) => {
 	try {
 		const userId = req.user._id;
 		const { bvn, dateOfBirth, gender, address, identification } = req.body;
 
-		console.log("🔵 KYC Update Request Started with Anchor");
+		console.log("🔵 KYC Update Request Started");
 		console.log("User ID:", userId);
 
 		const user = await User.findById(userId);
@@ -159,6 +162,9 @@ export const updateKYC = async (req, res) => {
 			if (dateOfBirth) user.kyc.dateOfBirth = new Date(dateOfBirth);
 			if (gender) user.kyc.gender = gender;
 			await user.save();
+
+			// Also register with Bridgecard if not already
+			await registerWithBridgecard(userId);
 
 			return res.status(200).json({
 				success: true,
@@ -212,6 +218,9 @@ export const updateKYC = async (req, res) => {
 				user.kyc.isVerified = true;
 				user.kyc.verifiedAt = new Date();
 				await user.save();
+
+				// Register with Bridgecard
+				await registerWithBridgecard(userId);
 
 				return res.status(200).json({
 					success: true,
@@ -269,6 +278,68 @@ export const updateKYC = async (req, res) => {
 		});
 	}
 };
+
+/**
+ * Register user with Bridgecard after KYC verification
+ */
+async function registerWithBridgecard(userId) {
+	try {
+		const user = await User.findById(userId);
+		if (!user) return;
+
+		// Check if already registered
+		const existingCardholder = await BridgecardCardholder.findOne({ userId });
+		if (existingCardholder) return;
+
+		// Prepare cardholder data
+		const nameParts = user.fullName.split(" ");
+		const firstName = nameParts[0];
+		const lastName = nameParts.slice(1).join(" ") || firstName;
+
+		const cardholderData = {
+			first_name: firstName,
+			last_name: lastName,
+			address: {
+				address: user.kyc?.address?.street || "Unknown Street",
+				city: user.kyc?.address?.city || "Lagos",
+				state: user.kyc?.address?.state || "Lagos",
+				country: "Nigeria",
+				postal_code: user.kyc?.address?.postalCode || "1000242",
+				house_no: "1",
+			},
+			phone: bridgecardService.formatPhoneNumber(
+				user.phoneNumber || "08000000000",
+			),
+			email_address: user.email,
+			identity: {
+				id_type: "NIGERIAN_BVN_VERIFICATION",
+				bvn: user.kyc?.bvn || "22222222222222",
+				selfie_image: user.profileImage || "https://example.com/selfie.jpg",
+			},
+			meta_data: {
+				userId: user._id.toString(),
+				platform: "kuditrak",
+			},
+		};
+
+		const result =
+			await bridgecardService.registerCardholderSync(cardholderData);
+
+		if (result.success) {
+			await BridgecardCardholder.create({
+				userId,
+				cardholderId: result.cardholderId,
+				isActive: true,
+				isIdVerified: true,
+				bridgecardData: result.data || {},
+				metaData: { registeredAt: new Date() },
+			});
+			console.log("✅ Bridgecard cardholder registered for user:", userId);
+		}
+	} catch (error) {
+		console.error("Bridgecard registration error:", error);
+	}
+}
 
 // controllers/userContoller.js - Update getKYCStatus
 export const getKYCStatus = async (req, res) => {
