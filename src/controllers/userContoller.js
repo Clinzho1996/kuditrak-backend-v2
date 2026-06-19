@@ -1,6 +1,7 @@
 import { v2 as cloudinary } from "cloudinary";
 import dotenv from "dotenv";
 import BankConnection from "../models/BankConnection.js";
+import BridgecardCardholder from "../models/BridgecardCardholder.js";
 import User from "../models/User.js";
 import { generateFinancialInsights } from "../services/aiService.js";
 import {
@@ -8,13 +9,12 @@ import {
 	getOrCreateAnchorCustomer,
 	upgradeCustomerToTier1,
 } from "../services/anchorCustomerService.js";
+import bridgecardService from "../services/bridgecardService.js";
 import {
 	removeDeviceToken,
 	saveDeviceToken,
 	sendPushToUser,
 } from "../services/pushService.js";
-import BridgecardCardholder from "../models/BridgecardCardholder.js";
-import bridgecardService from "../services/bridgecardService.js";
 
 dotenv.config();
 
@@ -537,5 +537,79 @@ export const deleteAccount = async (req, res) => {
 			.json({ success: true, message: "Account deleted successfully" });
 	} catch (err) {
 		res.status(500).json({ error: err.message });
+	}
+};
+
+// backend/controllers/userController.js - Add this function
+
+/**
+ * Upload ID image for KYC verification
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+export const uploadIDImage = async (req, res) => {
+	try {
+		const userId = req.user._id;
+
+		// Check if file was uploaded
+		if (!req.file) {
+			return res.status(400).json({
+				success: false,
+				message: "No image file provided",
+			});
+		}
+
+		// Validate file type
+		const allowedTypes = ["image/jpeg", "image/png", "image/jpg", "image/heic"];
+		if (!allowedTypes.includes(req.file.mimetype)) {
+			return res.status(400).json({
+				success: false,
+				message: "Invalid file type. Please upload a JPEG, PNG, or HEIC image.",
+			});
+		}
+
+		// Validate file size (max 5MB)
+		const maxSize = 5 * 1024 * 1024; // 5MB
+		if (req.file.size > maxSize) {
+			return res.status(400).json({
+				success: false,
+				message: "File too large. Maximum size is 5MB.",
+			});
+		}
+
+		// Upload to Cloudinary
+		const result = await cloudinary.uploader.upload(req.file.path, {
+			folder: "kuditrak/kyc/id_images",
+			transformation: [{ quality: "auto:good" }, { fetch_format: "auto" }],
+			allowed_formats: ["jpg", "png", "jpeg", "heic"],
+		});
+
+		console.log("✅ ID image uploaded to Cloudinary:", result.secure_url);
+
+		// Save the image URL to user's KYC record (optional)
+		const user = await User.findById(userId);
+		if (user) {
+			if (!user.kyc) {
+				user.kyc = {};
+			}
+			if (!user.kyc.identification) {
+				user.kyc.identification = {};
+			}
+			user.kyc.identification.imageUrl = result.secure_url;
+			await user.save();
+		}
+
+		res.status(200).json({
+			success: true,
+			message: "ID image uploaded successfully",
+			imageUrl: result.secure_url,
+			publicId: result.public_id,
+		});
+	} catch (error) {
+		console.error("❌ ID image upload error:", error);
+		res.status(500).json({
+			success: false,
+			message: error.message || "Failed to upload ID image",
+		});
 	}
 };
