@@ -1,5 +1,4 @@
-// backend/controllers/cardFundingController.js - Updated with Bridgecard FX rate
-
+// backend/controllers/cardFundingController.js
 import AnchorTransaction from "../models/AnchorTransaction.js";
 import AnchorWallet from "../models/AnchorWallet.js";
 import BridgecardCard from "../models/BridgecardCard.js";
@@ -11,10 +10,15 @@ import { sendPushToUser } from "../services/pushService.js";
  */
 export const getExchangeRate = async (req, res) => {
 	try {
+		console.log("🔵 Fetching exchange rate...");
+
 		// Fetch rate from Bridgecard
 		const result = await bridgecardService.getFxRateWithCache();
 
+		console.log("📊 Bridgecard FX Response:", JSON.stringify(result, null, 2));
+
 		if (!result.success) {
+			console.log("⚠️ Bridgecard FX rate failed, using fallback");
 			// Fallback to config if Bridgecard fails
 			const fallbackRate = process.env.USD_NGN_RATE || 1600;
 			return res.status(200).json({
@@ -27,15 +31,12 @@ export const getExchangeRate = async (req, res) => {
 		}
 
 		// Bridgecard returns rate as { "NGN-USD": 74100 }
-		// This means 1 USD = 74100 NGN? Actually it's 1 USD = 74100 NGN (in kobo?)
-		// Typically, Bridgecard returns the rate in kobo (100 kobo = 1 NGN)
-		// So 74100 kobo = 741 NGN per USD? Let's handle both cases
-
+		// This is in kobo (100 kobo = 1 NGN)
 		let rate = 1600; // Default fallback
 
 		if (result.rate) {
-			// The rate might be in kobo or direct
 			const rateValue = Object.values(result.rate)[0] || 0;
+			console.log(`📊 Raw FX Rate value: ${rateValue}`);
 
 			// If rate is > 1000, it's likely in kobo (e.g., 74100 kobo = 741 NGN)
 			if (rateValue > 1000) {
@@ -49,6 +50,8 @@ export const getExchangeRate = async (req, res) => {
 		const markup = 0.02;
 		const finalRate = rate * (1 + markup);
 
+		console.log(`✅ Final FX Rate: ₦${finalRate}/$1`);
+
 		res.status(200).json({
 			success: true,
 			rate: finalRate,
@@ -59,7 +62,7 @@ export const getExchangeRate = async (req, res) => {
 			raw: result.rate,
 		});
 	} catch (error) {
-		console.error("Get exchange rate error:", error);
+		console.error("❌ Get exchange rate error:", error);
 
 		// Return fallback rate
 		const fallbackRate = process.env.USD_NGN_RATE || 1600;
@@ -80,6 +83,8 @@ export const fundUSDCardFromWallet = async (req, res) => {
 	try {
 		const userId = req.user._id;
 		const { cardId, amountInNGN } = req.body;
+
+		console.log("🔵 Funding USD card:", { userId, cardId, amountInNGN });
 
 		if (!cardId || !amountInNGN || amountInNGN <= 0) {
 			return res.status(400).json({
@@ -260,7 +265,7 @@ export const fundUSDCardFromWallet = async (req, res) => {
 			},
 		});
 	} catch (error) {
-		console.error("Fund USD card error:", error);
+		console.error("❌ Fund USD card error:", error);
 		res.status(500).json({
 			success: false,
 			error: error.message,

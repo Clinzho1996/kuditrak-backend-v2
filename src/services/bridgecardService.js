@@ -1616,18 +1616,16 @@ export const updateCardPin = async (cardId, pin) => {
 	}
 };
 
-// backend/services/bridgecardService.js - Add FX rate function
-
-// ==================== FX RATE ====================
-
-/**
- * Get FX rate from Bridgecard
- * Returns the rate at which Bridgecard performs trades from local currencies to USD
- * Rate limited: once every minute
- */
 export const getFxRate = async () => {
 	try {
+		console.log("🔵 Fetching FX rate from Bridgecard...");
+
 		const response = await bridgecardApi.get("/cards/fx-rate");
+
+		console.log(
+			"📥 Bridgecard FX Response:",
+			JSON.stringify(response.data, null, 2),
+		);
 
 		if (response.data?.status === "success") {
 			console.log("✅ FX Rate fetched:", response.data.data);
@@ -1652,9 +1650,7 @@ export const getFxRate = async () => {
 	}
 };
 
-/**
- * Get FX rate with caching (to respect rate limit)
- */
+// Caching variables
 let cachedFxRate = null;
 let cachedFxRateTime = 0;
 const FX_RATE_CACHE_DURATION = 60000; // 60 seconds (respects 1/min limit)
