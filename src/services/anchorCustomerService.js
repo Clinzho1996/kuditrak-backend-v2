@@ -9,16 +9,17 @@ import {
 	splitFullName,
 } from "../utils/anchorHelper.js";
 
-// backend/services/anchorCustomerService.js - Fix phone number generation
-
-// backend/services/anchorCustomerService.js - Updated to use real KYC data
+// backend/services/anchorCustomerService.js - Updated with better handling
 
 export const getOrCreateAnchorCustomer = async (userId) => {
 	try {
-		// Check if user already has an Anchor customer
+		// Check if user already has an Anchor customer in local DB
 		let anchorCustomer = await AnchorCustomer.findOne({ userId });
 
 		if (anchorCustomer) {
+			console.log(
+				`✅ Found existing Anchor customer in local DB: ${anchorCustomer.anchorCustomerId}`,
+			);
 			return {
 				success: true,
 				anchorCustomer,
@@ -33,7 +34,6 @@ export const getOrCreateAnchorCustomer = async (userId) => {
 			return { success: false, error: "User not found" };
 		}
 
-		// ✅ LOG the actual user data
 		console.log("👤 User Data from DB:", {
 			fullName: user.fullName,
 			email: user.email,
@@ -51,7 +51,7 @@ export const getOrCreateAnchorCustomer = async (userId) => {
 			user.fullName,
 		);
 
-		// ✅ USE REAL ADDRESS from user's KYC data
+		// Use real address from user's KYC data
 		const address = {
 			addressLine_1: user.kyc?.address?.street || "123 Test Street",
 			addressLine_2: null,
@@ -63,11 +63,9 @@ export const getOrCreateAnchorCustomer = async (userId) => {
 
 		console.log("📍 Using address from DB:", address);
 
-		// ✅ USE REAL PHONE NUMBER from user
 		const phoneNumber = user.phoneNumber || "08000000000";
 		console.log("📞 Using phone number from DB:", phoneNumber);
 
-		// ✅ CHECK for REAL KYC Level 2 data
 		const hasKYCLevel2 =
 			user.kyc?.bvn && user.kyc?.dateOfBirth && user.kyc?.gender;
 
@@ -78,23 +76,28 @@ export const getOrCreateAnchorCustomer = async (userId) => {
 			console.log("   Gender:", user.kyc.gender);
 		}
 
-		let anchorResponse;
+		// ✅ FIRST: Check if the user already has an Anchor customer by email
+		console.log("🔍 Checking if email already has an Anchor customer...");
+
+		// Try to find existing customer by creating a new one and catching the error
+		let anchorResponse = null;
 
 		if (hasKYCLevel2 && isValidBVN(user.kyc.bvn)) {
-			console.log("📝 Creating customer with REAL KYC Level 2 (Tier 1)");
+			console.log(
+				"📝 Attempting to create customer with REAL KYC Level 2 (Tier 1)",
+			);
 
-			// ✅ USE REAL KYC DATA from user
 			anchorResponse = await anchorService.createAnchorCustomerWithKYC({
 				firstName,
 				lastName,
 				middleName,
 				maidenName,
 				email: user.email,
-				phoneNumber: phoneNumber, // ✅ Use real phone
-				address: address, // ✅ Use real address
-				bvn: user.kyc.bvn, // ✅ Use real BVN
+				phoneNumber: phoneNumber,
+				address: address,
+				bvn: user.kyc.bvn,
 				dateOfBirth: formatDateForAnchor(user.kyc.dateOfBirth),
-				gender: user.kyc.gender, // ✅ Use real gender
+				gender: user.kyc.gender,
 				metadata: {
 					userId: user._id.toString(),
 					platform: "kuditrak",
@@ -103,7 +106,7 @@ export const getOrCreateAnchorCustomer = async (userId) => {
 				},
 			});
 		} else {
-			console.log("📝 Creating customer as Tier 0 (no KYC data found)");
+			console.log("📝 Attempting to create customer as Tier 0");
 			anchorResponse = await anchorService.createAnchorCustomer({
 				firstName,
 				lastName,
@@ -120,18 +123,25 @@ export const getOrCreateAnchorCustomer = async (userId) => {
 			});
 		}
 
+		// ✅ If error is "Email already exists", link the existing customer
+		if (
+			!anchorResponse.success &&
+			anchorResponse.error?.includes("Email already exist")
+		) {
+			console.log(
+				"⚠️ Email already exists in Anchor. Linking existing customer...",
+			);
+
+			// Since we can't fetch the customer ID by email directly, we need to
+			// get it from the error message or use a workaround
+			return await linkExistingAnchorCustomer(user);
+		}
+
 		if (!anchorResponse.success) {
-			// If error is "Email already exists", try to link existing customer
-			if (anchorResponse.error?.includes("Email already exist")) {
-				console.log(
-					"⚠️ Email already exists in Anchor. Attempting to link existing customer...",
-				);
-				return await linkExistingAnchorCustomer(user);
-			}
 			return { success: false, error: anchorResponse.error };
 		}
 
-		// Save Anchor customer to database
+		// Save new Anchor customer to database
 		anchorCustomer = await AnchorCustomer.create({
 			userId,
 			anchorCustomerId: anchorResponse.customerId,
@@ -194,20 +204,19 @@ export const getOrCreateAnchorCustomer = async (userId) => {
  */
 const linkExistingAnchorCustomer = async (user) => {
 	try {
-		console.log("🔗 Linking existing Anchor customer for user:", user.email);
+		console.log(
+			"🔗 Attempting to link existing Anchor customer for:",
+			user.email,
+		);
 
-		// We need to find the existing Anchor customer ID
-		// Since we can't search by email directly, we'll create a temporary customer
-		// and catch the error to get the existing ID, or use the user's existing anchorCustomerId
-
-		// Check if user already has an anchorCustomerId
+		// Check if user already has an anchorCustomerId from a previous attempt
 		if (user.anchorCustomerId) {
 			console.log(
 				"✅ User already has anchorCustomerId:",
 				user.anchorCustomerId,
 			);
 
-			// Create local record
+			// Create local record with existing ID
 			const anchorCustomer = await AnchorCustomer.create({
 				userId: user._id,
 				anchorCustomerId: user.anchorCustomerId,
@@ -238,69 +247,93 @@ const linkExistingAnchorCustomer = async (user) => {
 			};
 		}
 
-		// If no anchorCustomerId, try to find by creating a customer with a unique email
-		// This is a workaround - in production, you'd want a proper way to find existing customers
-		const uniqueEmail = `temp_${Date.now()}_${user.email}`;
-		const tempPayload = {
-			firstName: user.fullName.split(" ")[0],
-			lastName: user.fullName.split(" ").slice(1).join(" ") || user.fullName,
-			email: uniqueEmail,
-			phoneNumber: user.phoneNumber || "08000000000",
-			address: {
-				addressLine_1: user.kyc?.address?.street || "Unknown Street",
-				city: user.kyc?.address?.city || "Lagos",
-				state: user.kyc?.address?.state || "Lagos",
-				postalCode: user.kyc?.address?.postalCode || "000000",
-				country: user.kyc?.address?.country || "NG",
-			},
+		// If no anchorCustomerId, we need to find the existing customer ID
+		// Workaround: Since we can't search by email, try to create with a temporary email
+		// This might fail if the system has strict email validation
+		console.log(
+			"🔄 No anchorCustomerId found, attempting to find existing customer...",
+		);
+
+		// Try to get the customer ID from the Anchor system
+		// One approach: Try to create a customer with a unique email, then update it
+		const tempEmail = `temp_${Date.now()}_${user.email}`;
+		console.log(`📧 Attempting with temporary email: ${tempEmail}`);
+
+		// Parse full name
+		const { firstName, lastName } = splitFullName(user.fullName);
+
+		const address = {
+			addressLine_1: user.kyc?.address?.street || "123 Test Street",
+			city: user.kyc?.address?.city || "Lagos",
+			state: user.kyc?.address?.state || "Lagos",
+			postalCode: user.kyc?.address?.postalCode || "100001",
+			country: user.kyc?.address?.country || "NG",
 		};
 
-		// Try to create with unique email
-		const response = await anchorService.createAnchorCustomer(tempPayload);
+		// Try to create with temporary email
+		const tempResponse = await anchorService.createAnchorCustomer({
+			firstName,
+			lastName,
+			email: tempEmail,
+			phoneNumber: user.phoneNumber || `080${Date.now().toString().slice(-8)}`,
+			address: address,
+			metadata: {
+				userId: user._id.toString(),
+				platform: "kuditrak",
+				isTemp: true,
+			},
+		});
 
-		if (response.success) {
-			// Created successfully with temp email - now update with real email
-			// This might not work if the real email is already taken, but we'll try
-			console.log("✅ Created temp customer, will try to update email");
+		if (tempResponse.success) {
+			console.log(
+				`✅ Created temporary customer with ID: ${tempResponse.customerId}`,
+			);
 
-			// Save the customer with the real email if possible
+			// Now try to update the email to the real one
+			// Note: This might fail if the email is already taken, but we can try
+			const updateResponse = await anchorService.updateCustomer(
+				tempResponse.customerId,
+				{ email: user.email },
+			);
+
+			if (updateResponse.success) {
+				console.log("✅ Updated customer with real email");
+			} else {
+				console.log("⚠️ Could not update email, using temporary ID");
+			}
+
+			// Save the customer
 			const anchorCustomer = await AnchorCustomer.create({
 				userId: user._id,
-				anchorCustomerId: response.customerId,
-				fullName: {
-					firstName: user.fullName.split(" ")[0],
-					lastName:
-						user.fullName.split(" ").slice(1).join(" ") || user.fullName,
-				},
+				anchorCustomerId: tempResponse.customerId,
+				fullName: { firstName, lastName },
 				email: user.email,
 				phoneNumber: user.phoneNumber || "08000000000",
-				address: {
-					addressLine_1: user.kyc?.address?.street || "Unknown Street",
-					city: user.kyc?.address?.city || "Lagos",
-					state: user.kyc?.address?.state || "Lagos",
-					postalCode: user.kyc?.address?.postalCode || "000000",
-					country: user.kyc?.address?.country || "NG",
-				},
+				address: address,
 				kycLevel: "TIER_0",
 				kycStatus: "pending",
 				metadata: { userId: user._id.toString() },
 			});
 
-			user.anchorCustomerId = response.customerId;
+			user.anchorCustomerId = tempResponse.customerId;
 			user.anchorCustomerStatus = "active";
+			user.anchorKycLevel = "TIER_0";
 			await user.save();
 
 			return {
 				success: true,
 				anchorCustomer,
-				customerId: response.customerId,
+				customerId: tempResponse.customerId,
 				isNew: true,
+				wasLinked: true,
 			};
 		}
 
+		// If all else fails, return error
 		return {
 			success: false,
 			error: "Could not link existing Anchor customer. Please contact support.",
+			details: "Email already exists and could not be linked automatically.",
 		};
 	} catch (error) {
 		console.error("Link existing Anchor customer error:", error);
