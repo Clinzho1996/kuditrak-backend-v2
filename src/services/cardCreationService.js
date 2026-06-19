@@ -1,0 +1,618 @@
+// backend/services/cardCreationService.js - Complete Integration
+
+import { initializeDefaultCategories } from "../controllers/categoryController.js";
+import AnchorWallet from "../models/AnchorWallet.js";
+import BridgecardCard from "../models/BridgecardCard.js";
+import BridgecardCardholder from "../models/BridgecardCardholder.js";
+import Budget from "../models/Budget.js";
+import CardRequest from "../models/CardRequest.js";
+import Category from "../models/Category.js";
+import User from "../models/User.js";
+import anchorService from "./anchorService.js";
+import bridgecardService from "./bridgecardService.js";
+import { sendPushToUser } from "./pushService.js";
+
+/**
+ * Create a card request with full budget & category integration (Step 1)
+ */
+export const createCardRequest = async (userId, cardData) => {
+	try {
+		// Ensure user has default categories
+		await initializeDefaultCategories(userId);
+
+		// Find or create the category for this budget
+		let category = await Category.findOne({
+			userId,
+			name: { $regex: new RegExp(`^${cardData.budgetCategory}$`, "i") },
+		});
+
+		// If category doesn't exist, create it
+		if (!category) {
+			// Map UI category names to our category system
+			const categoryMap = {
+				food: { name: "Food & Drinks", type: "expense" },
+				transport: { name: "Transport", type: "expense" },
+				entertain: { name: "Entertainment", type: "expense" },
+				shopping: { name: "Shopping", type: "expense" },
+				utilities: { name: "Bills & Utilities", type: "expense" },
+				health: { name: "Healthcare", type: "expense" },
+				education: { name: "Education", type: "expense" },
+				other: { name: "Miscellaneous", type: "expense" },
+			};
+
+			const categoryInfo =
+				categoryMap[cardData.budgetCategory] || categoryMap["other"];
+
+			category = await Category.create({
+				userId,
+				name: categoryInfo.name,
+				type: categoryInfo.type,
+				keywords: [cardData.budgetCategory],
+			});
+		}
+
+		// Find or create budget for this category
+		let budget = await Budget.findOne({
+			userId,
+			name: { $regex: new RegExp(`^${cardData.cardName}$`, "i") },
+		});
+
+		if (!budget) {
+			// Create a budget linked to this card
+			budget = await Budget.create({
+				userId,
+				name: cardData.cardName,
+				amount: cardData.spendingLimit || 0,
+				spent: 0,
+				frequency: "Monthly",
+				startDate: new Date(),
+				endDate: new Date(new Date().setMonth(new Date().getMonth() + 1)),
+			});
+
+			// Add budget to user's budgets array
+			await User.findByIdAndUpdate(userId, {
+				$push: { budgets: budget._id },
+			});
+		}
+
+		// Create the card request
+		const cardRequest = await CardRequest.create({
+			userId,
+			categoryId: category._id,
+			budgetId: budget._id,
+			cardDetails: {
+				cardType: cardData.cardType || "virtual",
+				color: cardData.color || "green",
+				cardName: cardData.cardName,
+				currency: cardData.currency || "USD",
+				budgetCategory: category.name,
+				spendingLimit: cardData.spendingLimit || 0,
+			},
+			spendingControls: {
+				totalLimit: cardData.spendingLimit || 0,
+				alertThreshold: cardData.alertThreshold || 75,
+				dailySpendingLimitEnabled: cardData.dailySpendingLimitEnabled || false,
+				dailyMaximum: cardData.dailyMaximum || 0,
+			},
+			notifications: {
+				transactionAlerts: cardData.transactionAlerts !== false,
+				limitWarnings: cardData.limitWarnings !== false,
+				autoRefillAlerts: cardData.autoRefillAlerts || false,
+			},
+			status: "pending",
+		});
+
+		// Update budget with card reference
+		budget.cardId = cardRequest._id;
+		await budget.save();
+
+		return {
+			success: true,
+			requestId: cardRequest._id,
+			cardRequest,
+			category,
+			budget,
+		};
+	} catch (error) {
+		console.error("Create card request error:", error);
+		return { success: false, error: error.message };
+	}
+};
+
+/**
+ * Process card creation (Step 2 & 3 combined)
+ */
+export const processCardCreation = async (requestId) => {
+	try {
+		const cardRequest = await CardRequest.findById(requestId);
+		if (!cardRequest) {
+			return { success: false, error: "Card request not found" };
+		}
+
+		if (cardRequest.status !== "pending") {
+			return {
+				success: false,
+				error: `Card request already ${cardRequest.status}`,
+			};
+		}
+
+		cardRequest.status = "processing";
+		await cardRequest.save();
+
+		const userId = cardRequest.userId;
+		const { cardType, currency, cardName, budgetCategory, spendingLimit } =
+			cardRequest.cardDetails;
+
+		let result;
+
+		// Route to appropriate provider based on currency
+		if (currency === "USD") {
+			result = await createBridgecardCard(userId, cardRequest);
+		} else if (currency === "NGN") {
+			result = await createAnchorCard(userId, cardRequest);
+		} else {
+			throw new Error("Unsupported currency");
+		}
+
+		if (!result.success) {
+			cardRequest.status = "failed";
+			cardRequest.metadata = { ...cardRequest.metadata, error: result.error };
+			await cardRequest.save();
+			return result;
+		}
+
+		// Update card request
+		cardRequest.status = "completed";
+		cardRequest.bridgecardCardId = result.cardId;
+		cardRequest.metadata = {
+			...cardRequest.metadata,
+			provider: result.provider,
+			cardCreatedAt: new Date(),
+		};
+		await cardRequest.save();
+
+		// Update budget with spending limit and card reference
+		if (cardRequest.budgetId) {
+			await Budget.findByIdAndUpdate(cardRequest.budgetId, {
+				amount: spendingLimit,
+				cardId: result.cardId,
+				cardRequestId: requestId,
+				isActive: true,
+			});
+		}
+
+		// Send notification
+		await sendPushToUser(
+			userId,
+			`💳 ${currency} ${cardType.charAt(0).toUpperCase() + cardType.slice(1)} Card Ready!`,
+			`Your "${cardName}" card for ${budgetCategory} has been created successfully.`,
+			{
+				type: "card_created",
+				cardId: result.cardId,
+				cardName: cardName,
+				currency: currency,
+				category: budgetCategory,
+			},
+		);
+
+		return {
+			success: true,
+			cardId: result.cardId,
+			provider: result.provider,
+			cardRequest,
+			card: result.card,
+		};
+	} catch (error) {
+		console.error("Process card creation error:", error);
+		return { success: false, error: error.message };
+	}
+};
+
+/**
+ * Create Bridgecard USD Card with category & budget links
+ */
+const createBridgecardCard = async (userId, cardRequest) => {
+	try {
+		// Get or create cardholder
+		let cardholder = await BridgecardCardholder.findOne({ userId });
+		if (!cardholder) {
+			const user = await User.findById(userId);
+			const registerResult = await bridgecardService.registerCardholderSync({
+				first_name: user.fullName.split(" ")[0],
+				last_name: user.fullName.split(" ").slice(1).join(" ") || user.fullName,
+				email: user.email,
+				phone: bridgecardService.formatPhoneNumber(
+					user.phoneNumber || "08000000000",
+				),
+				address: {
+					address: user.kyc?.address?.street || "Unknown Street",
+					city: user.kyc?.address?.city || "Lagos",
+					state: user.kyc?.address?.state || "Lagos",
+					country: "Nigeria",
+					postal_code: user.kyc?.address?.postalCode || "1000242",
+					house_no: "1",
+				},
+				identity: {
+					id_type: "NIGERIAN_BVN_VERIFICATION",
+					bvn: user.kyc?.bvn || "22222222222222",
+				},
+			});
+
+			if (!registerResult.success) {
+				return { success: false, error: "Failed to register cardholder" };
+			}
+
+			cardholder = await BridgecardCardholder.findOne({ userId });
+		}
+
+		// Check if cardholder is verified
+		if (!cardholder.isActive || !cardholder.isIdVerified) {
+			return {
+				success: false,
+				error: "Cardholder not verified. Please complete KYC.",
+			};
+		}
+
+		// Get category and budget info
+		const category = await Category.findById(cardRequest.categoryId);
+		const budget = await Budget.findById(cardRequest.budgetId);
+
+		// Create the card
+		const cardData = {
+			cardholderId: cardholder.cardholderId,
+			cardType: cardRequest.cardDetails.cardType,
+			cardBrand: "Mastercard",
+			cardLimit: "500000",
+			fundingAmount: "300",
+			metadata: {
+				userId: userId.toString(),
+				cardName: cardRequest.cardDetails.cardName,
+				budgetCategory: cardRequest.cardDetails.budgetCategory,
+				spendingLimit: cardRequest.cardDetails.spendingLimit,
+				cardRequestId: cardRequest._id.toString(),
+				categoryId: cardRequest.categoryId?.toString(),
+				budgetId: cardRequest.budgetId?.toString(),
+				color: cardRequest.cardDetails.color,
+				dailyLimit: cardRequest.spendingControls.dailyMaximum || 0,
+				alertThreshold: cardRequest.spendingControls.alertThreshold || 75,
+			},
+		};
+
+		const result = await bridgecardService.createUSDCard(cardData);
+
+		if (!result.success) {
+			return { success: false, error: result.error };
+		}
+
+		// Save card to database with all links
+		const newCard = await BridgecardCard.create({
+			userId,
+			cardholderId: cardholder.cardholderId,
+			cardId: result.cardId,
+			currency: "USD",
+			cardType: cardRequest.cardDetails.cardType,
+			cardBrand: "mastercard",
+			last4: result.cardDetails?.last4 || "0000",
+			expiryMonth: result.cardDetails?.expiry_month || "12",
+			expiryYear: result.cardDetails?.expiry_year || "28",
+			cardholderName: cardRequest.cardDetails.cardName,
+			status: "active",
+			metaData: {
+				cardName: cardRequest.cardDetails.cardName,
+				budgetCategory: cardRequest.cardDetails.budgetCategory,
+				spendingLimit: cardRequest.cardDetails.spendingLimit,
+				color: cardRequest.cardDetails.color,
+				categoryId: cardRequest.categoryId,
+				budgetId: cardRequest.budgetId,
+				dailyMaximum: cardRequest.spendingControls.dailyMaximum || 0,
+				alertThreshold: cardRequest.spendingControls.alertThreshold || 75,
+				transactionAlerts: cardRequest.notifications.transactionAlerts,
+				limitWarnings: cardRequest.notifications.limitWarnings,
+				autoRefillAlerts: cardRequest.notifications.autoRefillAlerts,
+			},
+			isBridgecardCard: true,
+		});
+
+		return {
+			success: true,
+			cardId: result.cardId,
+			provider: "bridgecard",
+			card: newCard,
+		};
+	} catch (error) {
+		console.error("Create Bridgecard card error:", error);
+		return { success: false, error: error.message };
+	}
+};
+
+/**
+ * Create Anchor NGN Virtual Account (acts as NGN "card")
+ */
+const createAnchorCard = async (userId, cardRequest) => {
+	try {
+		// Get or create Anchor customer
+		const anchorResult = await anchorService.getOrCreateAnchorCustomer(userId);
+		if (!anchorResult.success) {
+			return { success: false, error: "Failed to create Anchor customer" };
+		}
+
+		// Get main wallet
+		let wallet = await AnchorWallet.findOne({ userId, walletType: "main" });
+		if (!wallet) {
+			const walletResponse = await anchorService.createAnchorWallet(
+				anchorResult.customerId,
+				"Main Wallet",
+				{ userId: userId.toString() },
+			);
+			if (walletResponse.success) {
+				wallet = await AnchorWallet.create({
+					userId,
+					anchorCustomerId: anchorResult.customerId,
+					walletId: walletResponse.walletId,
+					walletType: "main",
+					balance: 0,
+					name: "Main Wallet",
+				});
+			}
+		}
+
+		// Create virtual account (NGN)
+		const accountResult = await anchorService.createVirtualAccount(
+			anchorResult.customerId,
+			wallet?.walletId,
+			{
+				userId: userId.toString(),
+				cardName: cardRequest.cardDetails.cardName,
+				budgetCategory: cardRequest.cardDetails.budgetCategory,
+				categoryId: cardRequest.categoryId,
+				budgetId: cardRequest.budgetId,
+				type: "card",
+			},
+		);
+
+		if (!accountResult.success) {
+			return { success: false, error: "Failed to create virtual account" };
+		}
+
+		// Save as card in our system
+		const newCard = await BridgecardCard.create({
+			userId,
+			anchorCustomerId: anchorResult.customerId,
+			walletId: wallet?._id,
+			cardId: accountResult.accountNumber || `anchor_${Date.now()}`,
+			currency: "NGN",
+			cardType: "virtual",
+			cardBrand: "anchor",
+			last4: accountResult.accountNumber?.slice(-4) || "0000",
+			expiryMonth: "12",
+			expiryYear: "28",
+			cardholderName: cardRequest.cardDetails.cardName,
+			status: "active",
+			metaData: {
+				cardName: cardRequest.cardDetails.cardName,
+				budgetCategory: cardRequest.cardDetails.budgetCategory,
+				spendingLimit: cardRequest.cardDetails.spendingLimit,
+				color: cardRequest.cardDetails.color,
+				categoryId: cardRequest.categoryId,
+				budgetId: cardRequest.budgetId,
+				accountNumber: accountResult.accountNumber,
+				bankName: accountResult.bankName,
+				dailyMaximum: cardRequest.spendingControls.dailyMaximum || 0,
+				alertThreshold: cardRequest.spendingControls.alertThreshold || 75,
+				transactionAlerts: cardRequest.notifications.transactionAlerts,
+				limitWarnings: cardRequest.notifications.limitWarnings,
+				autoRefillAlerts: cardRequest.notifications.autoRefillAlerts,
+				isAnchorCard: true,
+			},
+			isBridgecardCard: false,
+			isAnchorCard: true,
+		});
+
+		return {
+			success: true,
+			cardId: accountResult.accountNumber,
+			provider: "anchor",
+			card: newCard,
+		};
+	} catch (error) {
+		console.error("Create Anchor card error:", error);
+		return { success: false, error: error.message };
+	}
+};
+
+/**
+ * Get user's cards with full budget and category details
+ */
+export const getUserCardsWithDetails = async (userId) => {
+	try {
+		const cards = await BridgecardCard.find({ userId })
+			.sort({ createdAt: -1 })
+			.lean();
+
+		// Enhance with category and budget details
+		const enhancedCards = await Promise.all(
+			cards.map(async (card) => {
+				let category = null;
+				let budget = null;
+
+				if (card.metaData?.categoryId) {
+					category = await Category.findById(card.metaData.categoryId).select(
+						"name type",
+					);
+				}
+
+				if (card.metaData?.budgetId) {
+					budget = await Budget.findById(card.metaData.budgetId).select(
+						"name amount spent frequency",
+					);
+				}
+
+				return {
+					...card,
+					maskedPan: `**** **** **** ${card.last4}`,
+					provider: card.isAnchorCard ? "anchor" : "bridgecard",
+					displayName:
+						card.metaData?.cardName || card.cardholderName || "My Card",
+					color: card.metaData?.color || "green",
+					budgetCategory: card.metaData?.budgetCategory || "other",
+					spendingLimit: card.metaData?.spendingLimit || 0,
+					dailyLimit: card.metaData?.dailyMaximum || 0,
+					notifications: {
+						transactionAlerts: card.metaData?.transactionAlerts !== false,
+						limitWarnings: card.metaData?.limitWarnings !== false,
+						autoRefillAlerts: card.metaData?.autoRefillAlerts || false,
+					},
+					category: category
+						? {
+								id: category._id,
+								name: category.name,
+								type: category.type,
+							}
+						: null,
+					budget: budget
+						? {
+								id: budget._id,
+								name: budget.name,
+								amount: budget.amount,
+								spent: budget.spent,
+								remaining: budget.amount - budget.spent,
+								frequency: budget.frequency,
+							}
+						: null,
+				};
+			}),
+		);
+
+		return {
+			success: true,
+			cards: enhancedCards,
+		};
+	} catch (error) {
+		console.error("Get user cards with details error:", error);
+		return { success: false, error: error.message };
+	}
+};
+
+/**
+ * Track card spending and update budget
+ */
+export const trackCardSpending = async (userId, cardId, amount, category) => {
+	try {
+		// Find the card
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return { success: false, error: "Card not found" };
+		}
+
+		// Get the budget
+		const budgetId = card.metaData?.budgetId;
+		if (!budgetId) {
+			return { success: false, error: "No budget linked to this card" };
+		}
+
+		// Update budget spent amount
+		const budget = await Budget.findByIdAndUpdate(
+			budgetId,
+			{ $inc: { spent: amount } },
+			{ new: true },
+		);
+
+		if (!budget) {
+			return { success: false, error: "Budget not found" };
+		}
+
+		// Check if spending limit exceeded
+		const isOverLimit = budget.spent > budget.amount;
+		const percentageUsed = (budget.spent / budget.amount) * 100;
+
+		// Send alert if over limit
+		if (isOverLimit) {
+			await sendPushToUser(
+				userId,
+				"⚠️ Budget Alert: Spending Limit Exceeded",
+				`Your "${card.metaData?.cardName}" card has exceeded its budget of ${budget.amount}.`,
+				{ type: "budget_exceeded", cardId, budgetId, amount: budget.spent },
+			);
+		}
+
+		// Send alert if approaching limit (80%)
+		if (percentageUsed >= 80 && percentageUsed < 100) {
+			await sendPushToUser(
+				userId,
+				"⚠️ Budget Alert: Approaching Limit",
+				`You've used ${Math.round(percentageUsed)}% of your budget for "${card.metaData?.cardName}".`,
+				{
+					type: "budget_warning",
+					cardId,
+					budgetId,
+					percentage: Math.round(percentageUsed),
+				},
+			);
+		}
+
+		return {
+			success: true,
+			budget,
+			isOverLimit,
+			percentageUsed,
+		};
+	} catch (error) {
+		console.error("Track card spending error:", error);
+		return { success: false, error: error.message };
+	}
+};
+
+// backend/services/cardCreationService.js - Add this function
+
+/**
+ * Get card status by request ID
+ */
+export const getCardStatus = async (userId, requestId) => {
+	try {
+		const cardRequest = await CardRequest.findOne({
+			userId,
+			_id: requestId,
+		});
+
+		if (!cardRequest) {
+			return {
+				success: false,
+				error: "Card request not found",
+			};
+		}
+
+		// Get additional details if completed
+		let card = null;
+		let budget = null;
+		let category = null;
+
+		if (cardRequest.status === "completed") {
+			if (cardRequest.bridgecardCardId) {
+				card = await BridgecardCard.findOne({
+					userId,
+					cardId: cardRequest.bridgecardCardId,
+				});
+			}
+			if (cardRequest.budgetId) {
+				budget = await Budget.findById(cardRequest.budgetId);
+			}
+			if (cardRequest.categoryId) {
+				category = await Category.findById(cardRequest.categoryId);
+			}
+		}
+
+		return {
+			success: true,
+			status: cardRequest.status,
+			cardRequest: {
+				...cardRequest.toObject(),
+				card,
+				budget,
+				category,
+			},
+		};
+	} catch (error) {
+		console.error("Get card status error:", error);
+		return { success: false, error: error.message };
+	}
+};
