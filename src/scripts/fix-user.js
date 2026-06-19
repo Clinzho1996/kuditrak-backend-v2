@@ -1,80 +1,82 @@
-// backend/scripts/syncAnchorKYCStatus.js
+// backend/scripts/migrateToLive.js
 import dotenv from "dotenv";
 import mongoose from "mongoose";
 import path from "path";
 import AnchorCustomer from "../models/AnchorCustomer.js";
+import AnchorWallet from "../models/AnchorWallet.js";
 import User from "../models/User.js";
-import anchorService from "../services/anchorService.js";
+import { getOrCreateAnchorCustomer } from "../services/anchorCustomerService.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
 
-const syncAnchorKYCStatus = async () => {
+const migrateToLive = async () => {
 	try {
 		await mongoose.connect(process.env.MONGO_URI);
 
-		const email = "clintonsworld@yahoo.com";
-
-		// Find the user
-		const user = await User.findOne({ email });
-		if (!user) {
-			console.log(`❌ User not found with email: ${email}`);
-			return;
-		}
-
-		const anchorCustomer = await AnchorCustomer.findOne({ userId: user._id });
-		if (!anchorCustomer) {
-			console.log(`❌ No Anchor customer found for user: ${email}`);
-			return;
-		}
-
+		console.log("🚀 Starting migration to Anchor LIVE...");
 		console.log(
-			`📊 Fetching KYC status from Anchor for: ${anchorCustomer.anchorCustomerId}`,
+			`🔑 Using API Key: ${process.env.ANCHOR_API_KEY?.substring(0, 20)}...`,
 		);
+		console.log(`📍 Base URL: ${process.env.ANCHOR_BASE_URL}`);
 
-		// Get customer details from Anchor
-		const customerResponse = await anchorService.getAnchorCustomer(
-			anchorCustomer.anchorCustomerId,
-		);
-
-		if (!customerResponse.success) {
-			console.error("❌ Failed to fetch customer:", customerResponse.error);
-			return;
-		}
-
-		const attributes = customerResponse.customer.attributes;
-		const verification = attributes?.verification || {};
-		const kycLevel = verification?.level || attributes?.kycLevel || "TIER_0";
-		const kycStatus =
-			verification?.status || attributes?.kycStatus || "unverified";
-
-		console.log(`📊 Anchor KYC Status:`, {
-			kycLevel,
-			kycStatus,
-			verification: verification,
+		// Find all users with Anchor customers
+		const users = await User.find({
+			anchorCustomerId: { $exists: true, $ne: null },
 		});
 
-		// Update local records
-		anchorCustomer.kycLevel = kycLevel;
-		anchorCustomer.kycStatus =
-			kycStatus === "approved" ? "approved" : "pending";
-		await anchorCustomer.save();
+		console.log(`📊 Found ${users.length} users with Anchor customers`);
 
-		// Update user
-		user.anchorKycLevel = kycLevel;
-		if (kycStatus === "approved") {
-			user.kyc.isVerified = true;
-			user.kyc.verifiedAt = new Date();
+		for (const user of users) {
+			console.log(`\n🔄 Processing user: ${user.email}`);
+			console.log(`   Old Anchor ID: ${user.anchorCustomerId}`);
+			console.log(`   Old KYC Level: ${user.anchorKycLevel}`);
+
+			// Delete old Anchor records from local DB
+			await AnchorCustomer.deleteOne({ userId: user._id });
+			await AnchorWallet.deleteMany({ userId: user._id });
+
+			// Clear user's Anchor fields
+			user.anchorCustomerId = null;
+			user.anchorCustomerStatus = null;
+			user.anchorKycLevel = null;
+			await user.save();
+
+			// Create new Anchor customer with KYC data
+			console.log(`   Creating new Anchor customer with KYC...`);
+			const result = await getOrCreateAnchorCustomer(user._id);
+
+			if (result.success) {
+				console.log(`   ✅ New Anchor ID: ${result.customerId}`);
+				console.log(`   ✅ KYC Level: ${result.anchorCustomer.kycLevel}`);
+
+				// If user has KYC data, try to upgrade to Tier 1
+				if (user.kyc?.bvn && user.kyc?.dateOfBirth && user.kyc?.gender) {
+					console.log(`   🔄 Upgrading to Tier 1 with BVN: ${user.kyc.bvn}`);
+
+					const { upgradeCustomerToTier1 } =
+						await import("../services/anchorCustomerService.js");
+					const upgradeResult = await upgradeCustomerToTier1(
+						user._id,
+						user.kyc.bvn,
+						user.kyc.dateOfBirth.toISOString().split("T")[0],
+						user.kyc.gender,
+					);
+
+					console.log(
+						`   📊 Upgrade Result:`,
+						JSON.stringify(upgradeResult, null, 2),
+					);
+				}
+			} else {
+				console.log(`   ❌ Failed: ${result.error}`);
+			}
 		}
-		await user.save();
 
-		console.log(`✅ Updated local KYC status to: ${kycLevel} (${kycStatus})`);
-
+		console.log("\n✅ Migration complete!");
 		await mongoose.disconnect();
-		console.log("\n✅ Sync complete!");
 	} catch (error) {
 		console.error("❌ Error:", error);
-		process.exit(1);
 	}
 };
 
-syncAnchorKYCStatus();
+migrateToLive();

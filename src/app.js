@@ -24,7 +24,6 @@ import savingsRoutes from "./routes/savings.js";
 import subscriptionRoutes from "./routes/subscription.js";
 import transactionRoutes from "./routes/transactions.js";
 import userRoutes from "./routes/users.js";
-import walletRoutes from "./routes/wallet.js";
 import webhookRoutes from "./routes/webhookRoutes.js";
 
 // =============== LOAD ENVIRONMENT VARIABLES FIRST ===============
@@ -98,7 +97,7 @@ app.use(express.json());
 
 // Routes
 app.use("/api/auth", authRoutes);
-app.use("/api/wallet", walletRoutes);
+app.use("/api/wallet", anchorWalletRoutes);
 app.use("/api/savings", savingsRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/notifications", notificationRoutes);
@@ -113,7 +112,6 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/webhooks", webhookRoutes);
 app.use("/api/anchor/customers", anchorCustomerRoutes);
 app.use("/api/cards", cardRoutes);
-app.use("/api/anchor/wallets", anchorWalletRoutes);
 app.use("/api/anchor/cards", anchorCardRoutes);
 app.use("/api/anchor/accounts", anchorVirtualAccountRoutes);
 
