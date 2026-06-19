@@ -529,6 +529,8 @@ export const encryptPin = (pin) => {
  * @param {string} pin - 4-digit PIN (will be encrypted)
  * @param {object} metadata - Additional metadata
  */
+// backend/services/bridgecardService.js - Fix createUSDCard
+
 export const createUSDCard = async ({
 	cardholderId,
 	cardType = "virtual",
@@ -546,23 +548,35 @@ export const createUSDCard = async ({
 			encryptedPin = encryptPin(pin);
 		}
 
+		// ✅ Build the correct payload format for Bridgecard
 		const payload = {
 			cardholder_id: cardholderId,
 			card_type: cardType,
-			card_brand: cardBrand,
+			card_brand: "Mastercard", // Bridgecard expects "Mastercard" with capital M
 			card_currency: "USD",
 			card_limit: cardLimit,
 			funding_amount: fundingAmount,
-			meta_data: metadata,
+			meta_data: {
+				...metadata,
+				cardName: metadata.cardName || "My Card",
+				budgetCategory: metadata.budgetCategory || "other",
+			},
 		};
 
-		// Add optional fields
+		// ✅ Add PIN if provided (must be encrypted)
 		if (encryptedPin) {
 			payload.pin = encryptedPin;
 		}
+
+		// ✅ Add transaction reference if provided
 		if (transactionReference) {
 			payload.transaction_reference = transactionReference;
 		}
+
+		console.log(
+			"📝 Creating USD card with payload:",
+			JSON.stringify(payload, null, 2),
+		);
 
 		const response = await bridgecardApi.post("/cards/create_card", payload);
 
@@ -575,11 +589,36 @@ export const createUSDCard = async ({
 			};
 		}
 
+		// ✅ Handle validation errors
+		if (response.data?.detail) {
+			const errorMessages = response.data.detail
+				.map((d) => d.msg || d)
+				.join(", ");
+			return {
+				success: false,
+				error:
+					errorMessages || response.data?.message || "Card creation failed",
+			};
+		}
+
 		return {
 			success: false,
 			error: response.data?.message || "Card creation failed",
 		};
 	} catch (error) {
+		console.error("❌ Create USD card error:");
+		if (error.response) {
+			console.error("Status:", error.response.status);
+			console.error("Data:", JSON.stringify(error.response.data, null, 2));
+			return {
+				success: false,
+				error:
+					error.response.data?.message ||
+					error.response.data?.error ||
+					"Card creation failed",
+				details: error.response.data,
+			};
+		}
 		return handleBridgecardError(error);
 	}
 };

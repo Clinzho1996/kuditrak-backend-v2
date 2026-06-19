@@ -28,7 +28,7 @@ router.post("/create", createCard);
 router.get("/status/:requestId", getCardCreationStatus);
 
 // Card management
-router.get("", getUserCards);
+router.get("/", getUserCards);
 router.get("/:cardId", getCardDetails);
 router.get("/:cardId/balance", getCardBalance);
 router.get("/:cardId/transactions", getCardTransactions);
