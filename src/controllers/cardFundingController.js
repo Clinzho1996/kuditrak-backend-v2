@@ -3,7 +3,6 @@ import AnchorTransaction from "../models/AnchorTransaction.js";
 import AnchorWallet from "../models/AnchorWallet.js";
 import BridgecardCard from "../models/BridgecardCard.js";
 import bridgecardService from "../services/bridgecardService.js";
-import { sendPushToUser } from "../services/pushService.js";
 
 // backend/controllers/cardFundingController.js - Add test function
 
@@ -71,7 +70,7 @@ export const getExchangeRate = async (req, res) => {
 	}
 };
 
-// backend/controllers/cardFundingController.js - Updated with minimum amount check
+// backend/controllers/cardFundingController.js - Updated fundUSDCardFromWallet
 
 export const fundUSDCardFromWallet = async (req, res) => {
 	try {
@@ -130,7 +129,6 @@ export const fundUSDCardFromWallet = async (req, res) => {
 
 		if (fxResult.success && fxResult.rate) {
 			const rateValue = Object.values(fxResult.rate)[0] || 0;
-			// Convert from kobo if needed
 			usdRate = rateValue > 1000 ? rateValue / 100 : rateValue;
 		}
 
@@ -145,11 +143,10 @@ export const fundUSDCardFromWallet = async (req, res) => {
 		const conversionFee = amountInUSD * 0.01;
 		const finalAmountInUSD = amountInUSD - conversionFee;
 
-		// ✅ Check minimum amount (Bridgecard requires at least $3 or $4 depending on card limit)
-		const MINIMUM_USD_AMOUNT = 3.0; // $3 minimum
+		// Check minimum amount (Bridgecard requires at least $3 or $4 depending on card limit)
+		const MINIMUM_USD_AMOUNT = 3.0;
 		if (finalAmountInUSD < MINIMUM_USD_AMOUNT) {
-			// Calculate minimum NGN needed
-			const minNGNNeeded = Math.ceil((MINIMUM_USD_AMOUNT * finalRate) / 0.99); // Account for conversion fee
+			const minNGNNeeded = Math.ceil((MINIMUM_USD_AMOUNT * finalRate) / 0.99);
 
 			return res.status(400).json({
 				success: false,
@@ -157,18 +154,6 @@ export const fundUSDCardFromWallet = async (req, res) => {
 				minimumUSD: MINIMUM_USD_AMOUNT,
 				currentUSD: finalAmountInUSD,
 				minimumNGN: minNGNNeeded,
-				message: `Please enter at least ₦${minNGNNeeded.toLocaleString()} to fund your card.`,
-			});
-		}
-
-		// ✅ Also check maximum limit (optional)
-		const MAXIMUM_USD_AMOUNT = 10000; // $10,000 limit
-		if (finalAmountInUSD > MAXIMUM_USD_AMOUNT) {
-			return res.status(400).json({
-				success: false,
-				error: `Maximum funding amount is $${MAXIMUM_USD_AMOUNT.toFixed(2)}`,
-				maximumUSD: MAXIMUM_USD_AMOUNT,
-				currentUSD: finalAmountInUSD,
 			});
 		}
 
@@ -179,18 +164,43 @@ export const fundUSDCardFromWallet = async (req, res) => {
 			amountInUSD,
 			conversionFee,
 			finalAmountInUSD,
+			amountInCents: Math.round(finalAmountInUSD * 100),
 		});
+
+		// ✅ Check if issuing wallet has sufficient balance
+		// In sandbox, you need to fund the issuing wallet first
+		const walletBalance =
+			await bridgecardService.getIssuingWalletBalance("USD");
+		console.log("💰 Issuing Wallet Balance:", walletBalance);
+
+		if (walletBalance.success && walletBalance.balance < finalAmountInUSD) {
+			// Try to fund the issuing wallet automatically in sandbox
+			console.log("⚠️ Issuing wallet balance low. Attempting to fund...");
+			try {
+				// Fund with a large amount to cover testing
+				const fundResult = await bridgecardService.fundIssuingWallet(
+					"5000",
+					"USD",
+				);
+				console.log("💰 Issuing wallet funded:", fundResult);
+			} catch (fundErr) {
+				console.log(
+					"⚠️ Could not fund issuing wallet automatically:",
+					fundErr.message,
+				);
+			}
+		}
 
 		// Deduct NGN from wallet
 		wallet.balance -= amountInNGN;
 		await wallet.save();
 
-		// Fund the USD card via Bridgecard
+		// ✅ Fund the USD card via Bridgecard (amount will be converted to cents)
 		const fundingResult = await bridgecardService.fundCard(
 			card.cardId,
 			finalAmountInUSD,
 			"USD",
-			`fund_${Date.now()}`,
+			`fund_${Date.now()}_${userId.toString().slice(-6)}`,
 		);
 
 		if (!fundingResult.success) {
@@ -227,6 +237,7 @@ export const fundUSDCardFromWallet = async (req, res) => {
 				conversionFee: conversionFee,
 				transactionType: "wallet_to_card",
 				source: "bridgecard_fx",
+				bridgecardReference: fundingResult.transactionReference,
 			},
 		});
 
@@ -238,8 +249,8 @@ export const fundUSDCardFromWallet = async (req, res) => {
 			currency: "USD",
 			type: "credit",
 			category: "deposit",
-			status: "success",
-			description: `USD card funding from NGN wallet`,
+			status: "pending",
+			description: `USD card funding from NGN wallet (pending)`,
 			source: "wallet",
 			destination: "card",
 			metadata: {
@@ -248,40 +259,28 @@ export const fundUSDCardFromWallet = async (req, res) => {
 				sourceAmount: amountInNGN,
 				fxRate: usdRate,
 				finalRate: finalRate,
+				bridgecardReference: fundingResult.transactionReference,
+				status: fundingResult.status,
 			},
 		});
 
-		// Update card balance in local DB
-		card.balance = (card.balance || 0) + finalAmountInUSD;
-		await card.save();
-
-		// Send push notification
-		await sendPushToUser(
-			userId,
-			"💳 USD Card Funded!",
-			`$${finalAmountInUSD.toFixed(2)} has been added to your card ending in ${card.last4}.`,
-			{
-				type: "card_funded",
-				cardId: card.cardId,
-				amount: finalAmountInUSD,
-				currency: "USD",
-				fxRate: usdRate,
-			},
-		);
-
 		res.status(200).json({
 			success: true,
-			message: "USD card funded successfully",
+			message:
+				"USD card funding initiated. You'll receive a notification when complete.",
 			data: {
 				cardId: card.cardId,
 				cardLast4: card.last4,
 				amountInNGN,
 				amountInUSD: finalAmountInUSD,
+				amountInCents: Math.round(finalAmountInUSD * 100),
 				fxRate: usdRate,
 				finalRate: finalRate,
 				conversionFee,
-				newCardBalance: card.balance,
+				newCardBalance: (card.balance || 0) + finalAmountInUSD,
 				newWalletBalance: wallet.balance,
+				bridgecardReference: fundingResult.transactionReference,
+				status: fundingResult.status,
 				ngnTransaction: ngnTransaction._id,
 				usdTransaction: usdTransaction._id,
 			},

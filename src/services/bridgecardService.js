@@ -1277,8 +1277,14 @@ export const getCardBalance = async (cardId) => {
 	}
 };
 
+// backend/services/bridgecardService.js - Updated fundCard
+
 /**
  * Fund a card
+ * @param {string} cardId - The card ID
+ * @param {number} amount - Amount in USD (will be converted to cents)
+ * @param {string} currency - "USD" or "NGN"
+ * @param {string} transactionReference - Unique reference
  */
 export const fundCard = async (
 	cardId,
@@ -1287,15 +1293,26 @@ export const fundCard = async (
 	transactionReference = null,
 ) => {
 	try {
+		// ✅ Convert amount to cents (Bridgecard expects amount in cents)
+		// 1 USD = 100 cents, so multiply by 100
+		const amountInCents = Math.round(amount * 100);
+
+		// Generate transaction reference if not provided
+		const reference =
+			transactionReference ||
+			`fund_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+
 		const payload = {
 			card_id: cardId,
-			amount: amount.toString(),
+			amount: amountInCents.toString(), // Send in cents
+			transaction_reference: reference,
 			currency: currency,
 		};
 
-		if (transactionReference) {
-			payload.transaction_reference = transactionReference;
-		}
+		console.log(
+			"💳 Funding card with payload:",
+			JSON.stringify(payload, null, 2),
+		);
 
 		const response = await bridgecardApi.patch(
 			"/cards/fund_card_asynchronously",
@@ -1307,15 +1324,23 @@ export const fundCard = async (
 				success: true,
 				message: response.data.message,
 				data: response.data.data,
-				transactionReference: response.data.data?.transaction_reference,
+				transactionReference:
+					response.data.data?.transaction_reference || reference,
+				status: "pending",
 			};
 		}
 
 		return {
 			success: false,
 			error: response.data?.message || "Funding failed",
+			details: response.data,
 		};
 	} catch (error) {
+		console.error("❌ Fund card error:");
+		if (error.response) {
+			console.error("Status:", error.response.status);
+			console.error("Data:", JSON.stringify(error.response.data, null, 2));
+		}
 		return handleBridgecardError(error);
 	}
 };
