@@ -753,3 +753,63 @@ export const uploadIDImage = async (req, res) => {
 		});
 	}
 };
+
+// backend/controllers/userController.js
+
+/**
+ * Search for Kuditrak users by name, email, or phone number
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ */
+export const searchKuditrakUsers = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { q } = req.query;
+
+		// Validate search query
+		if (!q || q.trim().length < 2) {
+			return res.status(400).json({
+				success: false,
+				error: "Search query must be at least 2 characters",
+			});
+		}
+
+		const searchTerm = q.trim();
+		const searchRegex = new RegExp(searchTerm, "i");
+
+		// Search for users excluding the current user
+		const users = await User.find({
+			_id: { $ne: userId }, // Exclude self
+			$or: [
+				{ fullName: searchRegex },
+				{ email: searchRegex },
+				{ phoneNumber: searchRegex },
+			],
+		})
+			.select("_id fullName email phoneNumber profileImage") // Only return necessary fields
+			.limit(20) // Limit results
+			.lean();
+
+		// Format the response
+		const formattedUsers = users.map((user) => ({
+			id: user._id,
+			name: user.fullName,
+			email: user.email,
+			phoneNumber: user.phoneNumber,
+			profileImage: user.profileImage || null,
+		}));
+
+		res.status(200).json({
+			success: true,
+			users: formattedUsers,
+			count: formattedUsers.length,
+		});
+	} catch (error) {
+		console.error("❌ Search Kuditrak users error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+			message: "Failed to search users",
+		});
+	}
+};

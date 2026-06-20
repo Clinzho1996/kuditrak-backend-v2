@@ -12,6 +12,7 @@ import {
 	getKYCStatus,
 	getProfile,
 	registerDeviceToken,
+	searchKuditrakUsers,
 	testPushNotification,
 	unregisterDeviceToken,
 	updateKYC,
@@ -44,6 +45,7 @@ router.put("/profile", protect, updateProfile);
 // ================= KYC Routes =================
 // Update KYC information
 router.post("/kyc", protect, updateKYC);
+router.get("/search", protect, searchKuditrakUsers);
 
 // Get KYC status
 router.get("/kyc/status", protect, getKYCStatus);
