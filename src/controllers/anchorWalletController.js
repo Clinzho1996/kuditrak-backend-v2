@@ -1487,9 +1487,7 @@ export const verifyBankAccount = async (req, res) => {
 		}
 
 		// Get Paystack secret key from environment
-		const paystackSecretKey =
-			process.env.PAYSTACK_SECRET_KEY ||
-			process.env.EXPO_PUBLIC_PAYSTACK_SECRET_KEY;
+		const paystackSecretKey = process.env.PAYSTACK_SECRET;
 
 		if (!paystackSecretKey) {
 			console.error(
