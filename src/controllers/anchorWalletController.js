@@ -1,4 +1,5 @@
 // backend/controllers/anchorWalletController.js
+import mongoose from "mongoose";
 import AnchorCustomer from "../models/AnchorCustomer.js";
 import AnchorSubAccount from "../models/AnchorSubAccount.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
