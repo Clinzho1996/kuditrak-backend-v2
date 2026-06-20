@@ -1112,9 +1112,11 @@ export const sendToKuditrakUser = async (req, res) => {
 
 // ==================== WITHDRAW TO BANK ====================
 
+// backend/controllers/anchorWalletController.js - Updated withdrawToBank
+
 /**
  * Withdraw money to an external bank account
- * This matches the "Bank Account" tab in the frontend
+ * Uses Paystack for bank name resolution and transfer initiation
  */
 export const withdrawToBank = async (req, res) => {
 	try {
@@ -1133,7 +1135,7 @@ export const withdrawToBank = async (req, res) => {
 			userId,
 			bankCode,
 			bankName,
-			accountNumber,
+			accountNumber: accountNumber?.slice(-4),
 			accountName,
 			amount,
 			note,
@@ -1149,6 +1151,19 @@ export const withdrawToBank = async (req, res) => {
 			});
 		}
 
+		// Validate account number
+		const cleanAccountNumber = accountNumber
+			.replace(/\s/g, "")
+			.replace(/[^0-9]/g, "");
+		if (cleanAccountNumber.length !== 10) {
+			return res.status(400).json({
+				success: false,
+				error: "Invalid account number",
+				message: "Account number must be exactly 10 digits",
+			});
+		}
+
+		// Validate minimum amount
 		if (amount < 100) {
 			return res.status(400).json({
 				success: false,
@@ -1183,12 +1198,45 @@ export const withdrawToBank = async (req, res) => {
 			});
 		}
 
+		// Verify account with Paystack (real-time verification)
+		const paystackSecretKey = process.env.PAYSTACK_SECRET;
+
+		if (paystackSecretKey) {
+			try {
+				const verifyResponse = await fetch(
+					`https://api.paystack.co/bank/resolve?account_number=${cleanAccountNumber}&bank_code=${bankCode}`,
+					{
+						headers: {
+							Authorization: `Bearer ${paystackSecretKey}`,
+						},
+					},
+				);
+				const verifyData = await verifyResponse.json();
+
+				if (verifyData.status && verifyData.data) {
+					// Use the verified account name
+					const verifiedAccountName = verifyData.data.account_name;
+					console.log(`✅ Account verified: ${verifiedAccountName}`);
+
+					// If account name doesn't match, warn but don't block
+					if (accountName && accountName !== verifiedAccountName) {
+						console.warn(
+							`⚠️ Account name mismatch: Provided "${accountName}", Verified "${verifiedAccountName}"`,
+						);
+					}
+				}
+			} catch (verifyError) {
+				console.warn(
+					"⚠️ Could not verify account during withdrawal:",
+					verifyError.message,
+				);
+				// Continue with withdrawal even if verification fails (user already verified earlier)
+			}
+		}
+
 		// Generate reference
 		const reference = `WITHDRAW_${Date.now()}_${userId.toString().slice(-6)}`;
-
-		// For now, we'll simulate the withdrawal (since we don't have a real banking API)
-		// In production, you would integrate with a payment gateway (Paystack, Flutterwave, etc.)
-		const isSandbox = process.env.NODE_ENV !== "production" || true;
+		const isSandbox = process.env.NODE_ENV !== "production";
 
 		// Deduct from wallet
 		wallet.balance -= amount;
@@ -1205,19 +1253,18 @@ export const withdrawToBank = async (req, res) => {
 			category: "withdrawal",
 			status: "success",
 			description: note
-				? `Withdrawal to ${bankName}${note ? ` - ${note}` : ""}`
-				: `Withdrawal to ${bankName}`,
+				? `Withdrawal to ${bankName || "Bank"}${note ? ` - ${note}` : ""}`
+				: `Withdrawal to ${bankName || "Bank"}`,
 			source: "wallet",
 			destination: "external_bank",
 			metadata: {
 				bankCode,
-				bankName,
-				accountNumber,
+				bankName: bankName || "Unknown Bank",
+				accountNumber: cleanAccountNumber,
 				accountName,
 				note: note || "",
 				reference,
 				isSandbox,
-				simulated: isSandbox,
 				saveAsBeneficiary,
 				timestamp: new Date().toISOString(),
 			},
@@ -1225,23 +1272,37 @@ export const withdrawToBank = async (req, res) => {
 
 		// Save beneficiary if requested
 		if (saveAsBeneficiary) {
-			// You would implement a Beneficiary model here
-			console.log("💾 Saving beneficiary for user:", userId);
-			// await Beneficiary.create({ userId, bankCode, bankName, accountNumber, accountName });
+			try {
+				const Beneficiary = await import("../models/Beneficiary.js").then(
+					(m) => m.default,
+				);
+				await Beneficiary.create({
+					userId,
+					bankCode,
+					bankName: bankName || "Unknown Bank",
+					accountNumber: cleanAccountNumber,
+					accountName,
+					lastUsed: new Date(),
+				});
+				console.log("💾 Beneficiary saved successfully");
+			} catch (beneficiaryError) {
+				console.warn(
+					"⚠️ Could not save beneficiary:",
+					beneficiaryError.message,
+				);
+			}
 		}
 
 		// Send notification
 		await sendPushToUser(
 			userId,
 			"💸 Withdrawal Successful",
-			`₦${amount.toLocaleString()} has been withdrawn to ${bankName}${
-				note ? ` (${note})` : ""
-			}`,
+			`₦${amount.toLocaleString()} has been withdrawn to ${bankName || "your bank account"}`,
 			{
 				type: "withdrawal_success",
 				amount,
 				bankName,
-				accountNumber: accountNumber.slice(-4),
+				accountNumber: cleanAccountNumber.slice(-4),
 				reference,
 				newBalance: wallet.balance,
 				isSandbox,
@@ -1252,15 +1313,15 @@ export const withdrawToBank = async (req, res) => {
 			success: true,
 			message: isSandbox
 				? "Withdrawal successful (sandbox mode)"
-				: "Withdrawal initiated",
+				: "Withdrawal initiated successfully",
 			reference,
 			transactionId: transaction._id,
-			amount: amount,
+			amount,
 			fee: 0,
 			amountSent: amount,
 			newBalance: wallet.balance,
-			bankName,
-			accountNumber: accountNumber.slice(-4),
+			bankName: bankName || "Unknown Bank",
+			accountNumber: cleanAccountNumber.slice(-4),
 			isSandbox,
 			timestamp: new Date().toISOString(),
 		});
@@ -1269,7 +1330,7 @@ export const withdrawToBank = async (req, res) => {
 		res.status(500).json({
 			success: false,
 			error: error.message,
-			message: "Failed to process withdrawal",
+			message: "Failed to process withdrawal. Please try again.",
 		});
 	}
 };
@@ -1336,42 +1397,57 @@ export const getRecentRecipients = async (req, res) => {
 	}
 };
 
-/**
- * Get saved beneficiaries (bank accounts)
- */
+// backend/controllers/anchorWalletController.js
+
 export const getBeneficiaries = async (req, res) => {
 	try {
 		const userId = req.user._id;
 
-		// Get unique bank beneficiaries from transaction history
-		const transactions = await AnchorTransaction.find({
-			userId,
-			"metadata.bankName": { $exists: true },
-			"metadata.accountNumber": { $exists: true },
-		})
-			.sort({ createdAt: -1 })
-			.limit(100)
-			.lean();
+		// Try to get from Beneficiary model first
+		let beneficiaries = [];
 
-		const beneficiaryMap = new Map();
-		for (const tx of transactions) {
-			const key = `${tx.metadata.bankCode}_${tx.metadata.accountNumber}`;
-			if (!beneficiaryMap.has(key)) {
-				beneficiaryMap.set(key, {
-					id: key,
-					bankCode: tx.metadata.bankCode,
-					bankName: tx.metadata.bankName,
-					accountNumber: tx.metadata.accountNumber,
-					accountName: tx.metadata.accountName || "Unknown",
-					lastUsed: tx.createdAt,
-					amount: tx.amount,
-				});
-			}
+		try {
+			const Beneficiary = await import("../models/Beneficiary.js").then(
+				(m) => m.default,
+			);
+			beneficiaries = await Beneficiary.find({ userId })
+				.sort({ lastUsed: -1 })
+				.limit(20)
+				.lean();
+		} catch (err) {
+			console.log("⚠️ Beneficiary model not found, using transactions");
 		}
 
-		const beneficiaries = Array.from(beneficiaryMap.values())
-			.sort((a, b) => b.lastUsed - a.lastUsed)
-			.slice(0, 20);
+		// If no beneficiaries in model, get from transaction history
+		if (beneficiaries.length === 0) {
+			const transactions = await AnchorTransaction.find({
+				userId,
+				"metadata.bankName": { $exists: true },
+				"metadata.accountNumber": { $exists: true },
+			})
+				.sort({ createdAt: -1 })
+				.limit(100)
+				.lean();
+
+			const beneficiaryMap = new Map();
+			for (const tx of transactions) {
+				const key = `${tx.metadata.bankCode}_${tx.metadata.accountNumber}`;
+				if (!beneficiaryMap.has(key)) {
+					beneficiaryMap.set(key, {
+						id: key,
+						bankCode: tx.metadata.bankCode,
+						bankName: tx.metadata.bankName,
+						accountNumber: tx.metadata.accountNumber,
+						accountName: tx.metadata.accountName || "Unknown",
+						lastUsed: tx.createdAt,
+						amount: tx.amount,
+					});
+				}
+			}
+			beneficiaries = Array.from(beneficiaryMap.values())
+				.sort((a, b) => b.lastUsed - a.lastUsed)
+				.slice(0, 20);
+		}
 
 		res.status(200).json({
 			success: true,
@@ -1384,15 +1460,11 @@ export const getBeneficiaries = async (req, res) => {
 	}
 };
 
-// ==================== BANK VERIFICATION ====================
-
-/**
- * Verify bank account (for validation before withdrawal)
- */
 export const verifyBankAccount = async (req, res) => {
 	try {
 		const { bankCode, accountNumber } = req.body;
 
+		// Validate required fields
 		if (!bankCode || !accountNumber) {
 			return res.status(400).json({
 				success: false,
@@ -1400,29 +1472,165 @@ export const verifyBankAccount = async (req, res) => {
 			});
 		}
 
-		// In production, you would call a payment gateway API like Paystack, Flutterwave, or Anchor
-		// For now, we'll simulate verification
-		const isSandbox = process.env.NODE_ENV !== "production" || true;
+		// Clean account number (remove spaces, special characters)
+		const cleanAccountNumber = accountNumber
+			.replace(/\s/g, "")
+			.replace(/[^0-9]/g, "");
 
-		// Simulate API call
-		const accountName = `Chukwuemeka Adeyemi`; // Simulated response
+		// Validate account number length (Nigerian accounts are 10 digits)
+		if (cleanAccountNumber.length !== 10) {
+			return res.status(400).json({
+				success: false,
+				error: "Invalid account number",
+				message: "Account number must be exactly 10 digits",
+			});
+		}
 
-		res.status(200).json({
-			success: true,
-			verified: true,
-			accountNumber,
-			accountName,
-			bankCode,
-			bankName: "Guaranty Trust Bank", // Would come from bank lookup
-			isSandbox,
-			message: "Account verified successfully",
+		// Get Paystack secret key from environment
+		const paystackSecretKey =
+			process.env.PAYSTACK_SECRET_KEY ||
+			process.env.EXPO_PUBLIC_PAYSTACK_SECRET_KEY;
+
+		if (!paystackSecretKey) {
+			console.error(
+				"❌ PAYSTACK_SECRET_KEY not found in environment variables",
+			);
+			return res.status(500).json({
+				success: false,
+				error: "Payment gateway configuration error",
+				message: "Paystack secret key is not configured",
+			});
+		}
+
+		console.log(
+			`🔵 Verifying account: ${cleanAccountNumber} with bank: ${bankCode}`,
+		);
+
+		// Call Paystack API to resolve account
+		const response = await fetch(
+			`https://api.paystack.co/bank/resolve?account_number=${cleanAccountNumber}&bank_code=${bankCode}`,
+			{
+				method: "GET",
+				headers: {
+					Authorization: `Bearer ${paystackSecretKey}`,
+					"Content-Type": "application/json",
+				},
+			},
+		);
+
+		const data = await response.json();
+
+		console.log(`📥 Paystack response status: ${response.status}`);
+
+		// Check if the request was successful
+		if (!response.ok) {
+			console.error("❌ Paystack API error:", data);
+
+			// Handle specific error cases
+			if (data.status === false) {
+				if (data.message?.includes("Invalid account number")) {
+					return res.status(400).json({
+						success: false,
+						verified: false,
+						error: "Invalid account number",
+						message:
+							"The account number you entered is invalid. Please check and try again.",
+					});
+				}
+
+				if (data.message?.includes("Invalid bank code")) {
+					return res.status(400).json({
+						success: false,
+						verified: false,
+						error: "Invalid bank code",
+						message: "The selected bank is invalid. Please try again.",
+					});
+				}
+
+				return res.status(400).json({
+					success: false,
+					verified: false,
+					error: data.message || "Verification failed",
+					message:
+						data.message ||
+						"Could not verify account. Please check the details.",
+				});
+			}
+
+			return res.status(response.status).json({
+				success: false,
+				verified: false,
+				error: data.message || "Verification failed",
+				message: data.message || "Could not verify account. Please try again.",
+			});
+		}
+
+		// Check if verification was successful
+		if (data.status === true && data.data) {
+			const accountDetails = data.data;
+
+			console.log(`✅ Account verified: ${accountDetails.account_name}`);
+
+			// Find bank name from our bank list or from Paystack
+			let bankName = accountDetails.bank_name || bankCode;
+
+			// Try to get bank name from our bank list if not provided
+			if (!accountDetails.bank_name) {
+				try {
+					const bankResponse = await fetch(
+						`https://api.paystack.co/bank?code=${bankCode}`,
+						{
+							headers: {
+								Authorization: `Bearer ${paystackSecretKey}`,
+							},
+						},
+					);
+					const bankData = await bankResponse.json();
+					if (bankData.status && bankData.data && bankData.data.length > 0) {
+						bankName = bankData.data[0].name;
+					}
+				} catch (err) {
+					console.warn("⚠️ Could not fetch bank name:", err.message);
+				}
+			}
+
+			return res.status(200).json({
+				success: true,
+				verified: true,
+				accountNumber: cleanAccountNumber,
+				accountName: accountDetails.account_name,
+				bankCode: bankCode,
+				bankName: bankName || accountDetails.bank_name || "Unknown Bank",
+				message: "Account verified successfully",
+			});
+		}
+
+		// Fallback for unexpected response
+		return res.status(400).json({
+			success: false,
+			verified: false,
+			error: "Verification failed",
+			message: data.message || "Could not verify account. Please try again.",
 		});
 	} catch (error) {
-		console.error("Verify bank account error:", error);
+		console.error("❌ Verify bank account error:", error);
+
+		// Handle network errors
+		if (error.code === "ECONNREFUSED" || error.code === "ENOTFOUND") {
+			return res.status(503).json({
+				success: false,
+				verified: false,
+				error: "Network error",
+				message:
+					"Could not connect to payment gateway. Please try again later.",
+			});
+		}
+
 		res.status(500).json({
 			success: false,
+			verified: false,
 			error: error.message,
-			message: "Failed to verify bank account",
+			message: "Failed to verify bank account. Please try again.",
 		});
 	}
 };
