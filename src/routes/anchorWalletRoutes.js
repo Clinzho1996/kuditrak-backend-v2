@@ -8,7 +8,9 @@ import {
 	freezeWallet,
 	fundSubAccount,
 	getBalance,
+	getBeneficiaries,
 	getNGNWalletBalance,
+	getRecentRecipients,
 	getSubAccounts,
 	getUSDWalletBalance,
 	getWalletActivity,
@@ -19,8 +21,10 @@ import {
 	listVirtualAccounts,
 	lockSubAccount,
 	refreshBalance,
+	sendToKuditrakUser,
 	topupWallet,
 	unfreezeWallet,
+	verifyBankAccount,
 	verifyTopup,
 	withdrawFromSubAccount,
 	withdrawToBank,
@@ -30,6 +34,7 @@ import protect from "../middleware/auth.js";
 
 const router = express.Router();
 
+// Apply authentication to all routes
 router.use(protect);
 
 // ================= WALLET CREATION =================
@@ -55,8 +60,41 @@ router.post("/virtual-account/create", createVirtualAccount);
 router.post("/topup", topupWallet);
 router.get("/verify", verifyTopup);
 
-// ================= WITHDRAWALS =================
-router.post("/withdraw", withdrawToBank);
+// ================= SEND MONEY (Internal Transfers) =================
+/**
+ * Send money to another Kuditrak user
+ * @route POST /api/wallet/send
+ * @body { recipientEmail, recipientPhone, recipientHandle, amount, note }
+ */
+router.post("/send", sendToKuditrakUser);
+
+/**
+ * Get recent recipients (users you've sent money to)
+ * @route GET /api/wallet/recipients
+ * @query { limit }
+ */
+router.get("/recipients", getRecentRecipients);
+
+// ================= WITHDRAWALS (Bank Transfers) =================
+/**
+ * Withdraw money to an external bank account
+ * @route POST /api/wallet/withdraw/bank
+ * @body { bankCode, bankName, accountNumber, accountName, amount, note, saveAsBeneficiary }
+ */
+router.post("/withdraw/bank", withdrawToBank);
+
+/**
+ * Verify a bank account before withdrawal
+ * @route POST /api/wallet/verify/bank
+ * @body { bankCode, accountNumber }
+ */
+router.post("/verify/bank", verifyBankAccount);
+
+/**
+ * Get saved beneficiaries (bank accounts you've withdrawn to)
+ * @route GET /api/wallet/beneficiaries
+ */
+router.get("/beneficiaries", getBeneficiaries);
 
 // ================= TRANSACTIONS =================
 router.get("/transactions", getWalletTransactions);

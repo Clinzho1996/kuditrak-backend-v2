@@ -4,6 +4,7 @@ import AnchorSubAccount from "../models/AnchorSubAccount.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
 import AnchorVirtualAccount from "../models/AnchorVirtualAccount.js";
 import AnchorWallet from "../models/AnchorWallet.js";
+import User from "../models/User.js";
 import { getOrCreateAnchorCustomer } from "../services/anchorCustomerService.js";
 import anchorService from "../services/anchorService.js";
 import { sendPushToUser } from "../services/pushService.js";
@@ -83,7 +84,6 @@ export const createWallet = async (req, res) => {
 		let virtualNuban = null;
 
 		try {
-			// First, try to create a deposit account
 			accountResponse = await anchorService.createDepositAccount(
 				customerResult.customerId,
 				"SAVINGS",
@@ -98,7 +98,6 @@ export const createWallet = async (req, res) => {
 			if (accountResponse?.success) {
 				console.log("✅ Deposit account created:", accountResponse.accountId);
 
-				// Try to create virtual NUBAN
 				try {
 					const nubanResponse = await anchorService.createVirtualNuban(
 						accountResponse.accountId,
@@ -143,7 +142,6 @@ export const createWallet = async (req, res) => {
 
 		const wallet = await AnchorWallet.create(walletData);
 
-		// Save virtual account reference if NUBAN was created
 		if (virtualNuban) {
 			await AnchorVirtualAccount.create({
 				userId,
@@ -193,9 +191,6 @@ export const createWallet = async (req, res) => {
 
 // ==================== WALLET BALANCE ====================
 
-/**
- * Get wallet balance
- */
 export const getBalance = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -214,7 +209,6 @@ export const getBalance = async (req, res) => {
 			});
 		}
 
-		// Get virtual accounts for additional info
 		const virtualAccounts = await AnchorVirtualAccount.find({
 			userId,
 			isActive: true,
@@ -222,7 +216,6 @@ export const getBalance = async (req, res) => {
 
 		let balance = wallet.balance;
 
-		// ✅ Only fetch from Anchor if it's NOT a local wallet
 		if (
 			!wallet.isLocal &&
 			wallet.walletId &&
@@ -239,7 +232,6 @@ export const getBalance = async (req, res) => {
 				}
 			} catch (err) {
 				console.log("⚠️ Could not fetch real-time balance:", err.message);
-				// If Anchor fails, use local balance
 				balance = wallet.balance;
 			}
 		} else {
@@ -273,9 +265,6 @@ export const getBalance = async (req, res) => {
 	}
 };
 
-/**
- * Refresh wallet balance
- */
 export const refreshBalance = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -317,9 +306,6 @@ export const refreshBalance = async (req, res) => {
 	}
 };
 
-/**
- * Get USD wallet balance specifically
- */
 export const getUSDWalletBalance = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -350,9 +336,6 @@ export const getUSDWalletBalance = async (req, res) => {
 	}
 };
 
-/**
- * Get NGN wallet balance specifically
- */
 export const getNGNWalletBalance = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -371,9 +354,6 @@ export const getNGNWalletBalance = async (req, res) => {
 
 // ==================== WALLET MANAGEMENT ====================
 
-/**
- * Freeze wallet
- */
 export const freezeWallet = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -422,9 +402,6 @@ export const freezeWallet = async (req, res) => {
 	}
 };
 
-/**
- * Unfreeze wallet
- */
 export const unfreezeWallet = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -470,9 +447,6 @@ export const unfreezeWallet = async (req, res) => {
 	}
 };
 
-/**
- * Get wallet statistics
- */
 export const getWalletStats = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -533,9 +507,6 @@ export const getWalletStats = async (req, res) => {
 	}
 };
 
-/**
- * Get wallet activity timeline
- */
 export const getWalletActivity = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -557,7 +528,6 @@ export const getWalletActivity = async (req, res) => {
 			.sort({ createdAt: -1 })
 			.lean();
 
-		// Group by day
 		const grouped = transactions.reduce((acc, tx) => {
 			const date = tx.createdAt.toISOString().split("T")[0];
 			if (!acc[date]) {
@@ -600,9 +570,6 @@ export const getWalletActivity = async (req, res) => {
 
 // ==================== VIRTUAL ACCOUNTS ====================
 
-/**
- * List all virtual accounts
- */
 export const listVirtualAccounts = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -631,9 +598,6 @@ export const listVirtualAccounts = async (req, res) => {
 	}
 };
 
-/**
- * Create virtual account
- */
 export const createVirtualAccount = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -699,6 +663,8 @@ export const createVirtualAccount = async (req, res) => {
 	}
 };
 
+// ==================== TOPUP ====================
+
 export const topupWallet = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -739,13 +705,11 @@ export const topupWallet = async (req, res) => {
 		const isSandbox = process.env.NODE_ENV !== "production" || true;
 		const reference = `TOPUP_${Date.now()}_${userId.toString().slice(-6)}`;
 
-		// Update wallet balance
 		wallet.balance += amount;
 		await wallet.save();
 
 		console.log(`✅ Topup: +${amount}, new balance: ${wallet.balance}`);
 
-		// Create transaction record
 		const transaction = await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: wallet.anchorCustomerId,
@@ -802,11 +766,6 @@ export const topupWallet = async (req, res) => {
 	}
 };
 
-// backend/controllers/anchorWalletController.js - Updated verifyTopup
-
-/**
- * Verify topup
- */
 export const verifyTopup = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -840,11 +799,9 @@ export const verifyTopup = async (req, res) => {
 			});
 		}
 
-		// Update transaction status
 		transaction.status = "success";
 		await transaction.save();
 
-		// Update wallet balance if not already updated
 		const wallet = await AnchorWallet.findById(transaction.walletId);
 		if (wallet) {
 			wallet.balance += transaction.amount;
@@ -875,43 +832,369 @@ export const verifyTopup = async (req, res) => {
 	}
 };
 
-// backend/controllers/anchorWalletController.js - Updated withdrawToBank
+// ==================== SEND MONEY (INTERNAL TRANSFER) ====================
 
-export const withdrawToBank = async (req, res) => {
+/**
+ * Send money to another Kuditrak user (internal wallet transfer)
+ * This matches the "Kuditrak User" tab in the frontend
+ */
+export const sendToKuditrakUser = async (req, res) => {
 	try {
-		const userId = req.user._id;
-		const { bankAccountId, amount } = req.body;
+		const senderId = req.user._id;
+		const { recipientEmail, recipientPhone, recipientHandle, amount, note } =
+			req.body;
 
-		if (!bankAccountId || !amount || amount <= 0) {
+		console.log("🔵 Send to Kuditrak user:", {
+			senderId,
+			recipientEmail,
+			recipientPhone,
+			recipientHandle,
+			amount,
+			note,
+		});
+
+		// Validate amount
+		if (!amount || amount <= 0) {
 			return res.status(400).json({
 				success: false,
-				error: "Invalid request parameters",
+				error: "Invalid amount",
+				message: "Amount must be greater than 0",
 			});
 		}
 
-		const wallet = await AnchorWallet.findOne({ userId, walletType: "main" });
+		if (amount < 1) {
+			return res.status(400).json({
+				success: false,
+				error: "Minimum amount is ₦1",
+				message: "Please enter a valid amount",
+			});
+		}
+
+		// Find recipient by email, phone, or handle
+		let recipient;
+		if (recipientEmail) {
+			recipient = await User.findOne({ email: recipientEmail });
+		} else if (recipientPhone) {
+			recipient = await User.findOne({ phoneNumber: recipientPhone });
+		} else if (recipientHandle) {
+			// If handle is like "@username", extract username
+			const cleanHandle = recipientHandle.startsWith("@")
+				? recipientHandle.substring(1)
+				: recipientHandle;
+			recipient = await User.findOne({
+				$or: [
+					{ fullName: { $regex: cleanHandle, $options: "i" } },
+					{ email: { $regex: cleanHandle, $options: "i" } },
+				],
+			});
+		}
+
+		if (!recipient) {
+			return res.status(404).json({
+				success: false,
+				error: "Recipient not found",
+				message: "Could not find a Kuditrak user with that identifier",
+			});
+		}
+
+		// Check if sender is trying to send to themselves
+		if (recipient._id.toString() === senderId.toString()) {
+			return res.status(400).json({
+				success: false,
+				error: "Invalid recipient",
+				message: "You cannot send money to yourself",
+			});
+		}
+
+		// Get sender's wallet
+		const senderWallet = await AnchorWallet.findOne({
+			userId: senderId,
+			walletType: "main",
+		});
+
+		if (!senderWallet) {
+			return res.status(404).json({
+				success: false,
+				error: "Sender wallet not found",
+				message: "Please create a wallet first",
+				requiresWalletCreation: true,
+			});
+		}
+
+		// Get recipient's wallet
+		let recipientWallet = await AnchorWallet.findOne({
+			userId: recipient._id,
+			walletType: "main",
+		});
+
+		// If recipient doesn't have a wallet, create one
+		if (!recipientWallet) {
+			console.log("🔄 Creating wallet for recipient:", recipient._id);
+
+			// Ensure recipient has Anchor customer
+			const customerResult = await getOrCreateAnchorCustomer(recipient._id);
+			if (!customerResult.success) {
+				return res.status(400).json({
+					success: false,
+					error: "Could not create recipient wallet",
+					message: "Recipient account is not fully set up",
+				});
+			}
+
+			recipientWallet = await AnchorWallet.create({
+				userId: recipient._id,
+				anchorCustomerId: customerResult.customerId,
+				walletId: `local_${Date.now()}_${recipient._id.toString().slice(-6)}`,
+				walletType: "main",
+				balance: 0,
+				name: "Main Wallet",
+				currency: "NGN",
+				status: "active",
+				isLocal: true,
+			});
+		}
+
+		// Check sender's balance
+		if (senderWallet.balance < amount) {
+			return res.status(400).json({
+				success: false,
+				error: "Insufficient balance",
+				available: senderWallet.balance,
+				requested: amount,
+				message: `Your balance (₦${senderWallet.balance.toLocaleString()}) is insufficient for this transfer`,
+			});
+		}
+
+		// Generate reference
+		const reference = `SEND_${Date.now()}_${senderId.toString().slice(-6)}`;
+
+		// Perform the transfer (atomic operation)
+		const session = await mongoose.startSession();
+		session.startTransaction();
+
+		try {
+			// Deduct from sender
+			senderWallet.balance -= amount;
+			await senderWallet.save({ session });
+
+			// Add to recipient
+			recipientWallet.balance += amount;
+			await recipientWallet.save({ session });
+
+			// Create sender transaction (debit)
+			const senderTransaction = await AnchorTransaction.create(
+				[
+					{
+						userId: senderId,
+						anchorCustomerId: senderWallet.anchorCustomerId,
+						walletId: senderWallet._id,
+						amount: amount,
+						currency: "NGN",
+						type: "debit",
+						category: "transfer",
+						status: "success",
+						description: note
+							? `Sent to ${recipient.fullName}${note ? ` - ${note}` : ""}`
+							: `Sent to ${recipient.fullName}`,
+						source: "wallet",
+						destination: "wallet",
+						metadata: {
+							reference,
+							recipientId: recipient._id,
+							recipientName: recipient.fullName,
+							recipientEmail: recipient.email,
+							note: note || "",
+							isKuditrakTransfer: true,
+							timestamp: new Date().toISOString(),
+						},
+					},
+				],
+				{ session },
+			);
+
+			// Create recipient transaction (credit)
+			const recipientTransaction = await AnchorTransaction.create(
+				[
+					{
+						userId: recipient._id,
+						anchorCustomerId: recipientWallet.anchorCustomerId,
+						walletId: recipientWallet._id,
+						amount: amount,
+						currency: "NGN",
+						type: "credit",
+						category: "transfer",
+						status: "success",
+						description: note
+							? `Received from ${req.user.fullName}${note ? ` - ${note}` : ""}`
+							: `Received from ${req.user.fullName}`,
+						source: "wallet",
+						destination: "wallet",
+						metadata: {
+							reference,
+							senderId: senderId,
+							senderName: req.user.fullName,
+							note: note || "",
+							isKuditrakTransfer: true,
+							timestamp: new Date().toISOString(),
+						},
+					},
+				],
+				{ session },
+			);
+
+			await session.commitTransaction();
+
+			// Send notifications
+			await sendPushToUser(
+				senderId,
+				"💸 Money Sent",
+				`You sent ₦${amount.toLocaleString()} to ${recipient.fullName}${
+					note ? ` (${note})` : ""
+				}`,
+				{
+					type: "money_sent",
+					amount,
+					recipientId: recipient._id,
+					recipientName: recipient.fullName,
+					reference,
+					newBalance: senderWallet.balance,
+				},
+			);
+
+			await sendPushToUser(
+				recipient._id,
+				"💰 Money Received",
+				`You received ₦${amount.toLocaleString()} from ${req.user.fullName}${
+					note ? ` (${note})` : ""
+				}`,
+				{
+					type: "money_received",
+					amount,
+					senderId: senderId,
+					senderName: req.user.fullName,
+					reference,
+					newBalance: recipientWallet.balance,
+				},
+			);
+
+			res.status(200).json({
+				success: true,
+				message: "Transfer completed successfully",
+				reference,
+				amount: amount,
+				recipient: {
+					id: recipient._id,
+					name: recipient.fullName,
+					email: recipient.email,
+				},
+				senderNewBalance: senderWallet.balance,
+				recipientNewBalance: recipientWallet.balance,
+				transactionId: senderTransaction[0]._id,
+				fee: 0,
+				note: note || "",
+				timestamp: new Date().toISOString(),
+			});
+		} catch (error) {
+			await session.abortTransaction();
+			throw error;
+		} finally {
+			session.endSession();
+		}
+	} catch (error) {
+		console.error("❌ Send to Kuditrak user error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+			message: "Failed to send money",
+		});
+	}
+};
+
+// ==================== WITHDRAW TO BANK ====================
+
+/**
+ * Withdraw money to an external bank account
+ * This matches the "Bank Account" tab in the frontend
+ */
+export const withdrawToBank = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const {
+			bankCode,
+			bankName,
+			accountNumber,
+			accountName,
+			amount,
+			note,
+			saveAsBeneficiary = false,
+		} = req.body;
+
+		console.log("🔵 Withdraw to bank:", {
+			userId,
+			bankCode,
+			bankName,
+			accountNumber,
+			accountName,
+			amount,
+			note,
+			saveAsBeneficiary,
+		});
+
+		// Validate required fields
+		if (!bankCode || !accountNumber || !amount || amount <= 0) {
+			return res.status(400).json({
+				success: false,
+				error: "Invalid request parameters",
+				message: "Bank code, account number, and amount are required",
+			});
+		}
+
+		if (amount < 100) {
+			return res.status(400).json({
+				success: false,
+				error: "Minimum withdrawal is ₦100",
+				message: "Please enter a valid amount",
+			});
+		}
+
+		// Get user's wallet
+		const wallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
+
 		if (!wallet) {
 			return res.status(404).json({
 				success: false,
 				error: "Wallet not found",
+				message: "Please create a wallet first",
+				requiresWalletCreation: true,
 			});
 		}
 
+		// Check balance
 		if (wallet.balance < amount) {
 			return res.status(400).json({
 				success: false,
 				error: "Insufficient balance",
 				available: wallet.balance,
 				requested: amount,
+				message: `Your balance (₦${wallet.balance.toLocaleString()}) is insufficient for this withdrawal`,
 			});
 		}
 
+		// Generate reference
+		const reference = `WITHDRAW_${Date.now()}_${userId.toString().slice(-6)}`;
+
+		// For now, we'll simulate the withdrawal (since we don't have a real banking API)
+		// In production, you would integrate with a payment gateway (Paystack, Flutterwave, etc.)
+		const isSandbox = process.env.NODE_ENV !== "production" || true;
+
+		// Deduct from wallet
 		wallet.balance -= amount;
 		await wallet.save();
 
-		const reference = `WITHDRAW_${Date.now()}_${userId.toString().slice(-6)}`;
-
-		// ✅ Create transaction with valid enum values
+		// Create transaction record
 		const transaction = await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: wallet.anchorCustomerId,
@@ -919,50 +1202,233 @@ export const withdrawToBank = async (req, res) => {
 			amount,
 			currency: "NGN",
 			type: "debit",
-			category: "withdrawal", // Valid enum value
+			category: "withdrawal",
 			status: "success",
-			description: `Withdrawal to bank account`,
-			source: "wallet", // Valid enum value
-			destination: "external_bank", // Valid enum value
+			description: note
+				? `Withdrawal to ${bankName}${note ? ` - ${note}` : ""}`
+				: `Withdrawal to ${bankName}`,
+			source: "wallet",
+			destination: "external_bank",
 			metadata: {
-				bankAccountId,
+				bankCode,
+				bankName,
+				accountNumber,
+				accountName,
+				note: note || "",
 				reference,
-				isSandbox: true,
+				isSandbox,
+				simulated: isSandbox,
+				saveAsBeneficiary,
 				timestamp: new Date().toISOString(),
 			},
 		});
 
+		// Save beneficiary if requested
+		if (saveAsBeneficiary) {
+			// You would implement a Beneficiary model here
+			console.log("💾 Saving beneficiary for user:", userId);
+			// await Beneficiary.create({ userId, bankCode, bankName, accountNumber, accountName });
+		}
+
+		// Send notification
 		await sendPushToUser(
 			userId,
 			"💸 Withdrawal Successful",
-			`${transaction.currency} ${transaction.amount.toLocaleString()} has been withdrawn from your wallet.`,
+			`₦${amount.toLocaleString()} has been withdrawn to ${bankName}${
+				note ? ` (${note})` : ""
+			}`,
 			{
 				type: "withdrawal_success",
-				amount: transaction.amount,
-				currency: transaction.currency,
+				amount,
+				bankName,
+				accountNumber: accountNumber.slice(-4),
 				reference,
+				newBalance: wallet.balance,
+				isSandbox,
 			},
 		);
 
 		res.status(200).json({
 			success: true,
-			message: "Withdrawal successful",
+			message: isSandbox
+				? "Withdrawal successful (sandbox mode)"
+				: "Withdrawal initiated",
 			reference,
 			transactionId: transaction._id,
-			newBalance: wallet.balance,
+			amount: amount,
 			fee: 0,
 			amountSent: amount,
+			newBalance: wallet.balance,
+			bankName,
+			accountNumber: accountNumber.slice(-4),
+			isSandbox,
+			timestamp: new Date().toISOString(),
 		});
 	} catch (error) {
-		console.error("Withdraw error:", error);
+		console.error("❌ Withdraw to bank error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+			message: "Failed to process withdrawal",
+		});
+	}
+};
+
+// ==================== GET RECIPIENTS / BENEFICIARIES ====================
+
+/**
+ * Get recent recipients for the user
+ * This supports the "Recent recipients" list in the frontend
+ */
+export const getRecentRecipients = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { limit = 10 } = req.query;
+
+		// Get unique recipients from transaction history
+		const transactions = await AnchorTransaction.find({
+			userId,
+			"metadata.isKuditrakTransfer": true,
+			"metadata.recipientId": { $exists: true },
+		})
+			.sort({ createdAt: -1 })
+			.limit(50)
+			.lean();
+
+		// Extract unique recipients
+		const recipientMap = new Map();
+		for (const tx of transactions) {
+			const recipientId = tx.metadata?.recipientId;
+			if (recipientId && !recipientMap.has(recipientId)) {
+				try {
+					const user = await User.findById(recipientId).select(
+						"fullName email phoneNumber profileImage",
+					);
+					if (user) {
+						recipientMap.set(recipientId, {
+							id: user._id,
+							name: user.fullName,
+							email: user.email,
+							phoneNumber: user.phoneNumber,
+							profileImage: user.profileImage,
+							lastTransaction: tx.createdAt,
+							amount: tx.amount,
+						});
+					}
+				} catch (err) {
+					console.log("⚠️ Could not fetch recipient:", err.message);
+				}
+			}
+		}
+
+		const recipients = Array.from(recipientMap.values())
+			.sort((a, b) => b.lastTransaction - a.lastTransaction)
+			.slice(0, parseInt(limit));
+
+		res.status(200).json({
+			success: true,
+			recipients,
+			count: recipients.length,
+		});
+	} catch (error) {
+		console.error("Get recent recipients error:", error);
 		res.status(500).json({ error: error.message });
 	}
 };
-// ==================== TRANSACTIONS ====================
 
 /**
- * Get wallet transactions
+ * Get saved beneficiaries (bank accounts)
  */
+export const getBeneficiaries = async (req, res) => {
+	try {
+		const userId = req.user._id;
+
+		// Get unique bank beneficiaries from transaction history
+		const transactions = await AnchorTransaction.find({
+			userId,
+			"metadata.bankName": { $exists: true },
+			"metadata.accountNumber": { $exists: true },
+		})
+			.sort({ createdAt: -1 })
+			.limit(100)
+			.lean();
+
+		const beneficiaryMap = new Map();
+		for (const tx of transactions) {
+			const key = `${tx.metadata.bankCode}_${tx.metadata.accountNumber}`;
+			if (!beneficiaryMap.has(key)) {
+				beneficiaryMap.set(key, {
+					id: key,
+					bankCode: tx.metadata.bankCode,
+					bankName: tx.metadata.bankName,
+					accountNumber: tx.metadata.accountNumber,
+					accountName: tx.metadata.accountName || "Unknown",
+					lastUsed: tx.createdAt,
+					amount: tx.amount,
+				});
+			}
+		}
+
+		const beneficiaries = Array.from(beneficiaryMap.values())
+			.sort((a, b) => b.lastUsed - a.lastUsed)
+			.slice(0, 20);
+
+		res.status(200).json({
+			success: true,
+			beneficiaries,
+			count: beneficiaries.length,
+		});
+	} catch (error) {
+		console.error("Get beneficiaries error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+// ==================== BANK VERIFICATION ====================
+
+/**
+ * Verify bank account (for validation before withdrawal)
+ */
+export const verifyBankAccount = async (req, res) => {
+	try {
+		const { bankCode, accountNumber } = req.body;
+
+		if (!bankCode || !accountNumber) {
+			return res.status(400).json({
+				success: false,
+				error: "Bank code and account number are required",
+			});
+		}
+
+		// In production, you would call a payment gateway API like Paystack, Flutterwave, or Anchor
+		// For now, we'll simulate verification
+		const isSandbox = process.env.NODE_ENV !== "production" || true;
+
+		// Simulate API call
+		const accountName = `Chukwuemeka Adeyemi`; // Simulated response
+
+		res.status(200).json({
+			success: true,
+			verified: true,
+			accountNumber,
+			accountName,
+			bankCode,
+			bankName: "Guaranty Trust Bank", // Would come from bank lookup
+			isSandbox,
+			message: "Account verified successfully",
+		});
+	} catch (error) {
+		console.error("Verify bank account error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+			message: "Failed to verify bank account",
+		});
+	}
+};
+
+// ==================== TRANSACTIONS ====================
+
 export const getWalletTransactions = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -996,9 +1462,6 @@ export const getWalletTransactions = async (req, res) => {
 	}
 };
 
-/**
- * Get transaction by ID
- */
 export const getWalletTransactionById = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -1022,9 +1485,6 @@ export const getWalletTransactionById = async (req, res) => {
 	}
 };
 
-/**
- * Export transactions (CSV)
- */
 export const exportTransactions = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -1062,9 +1522,6 @@ export const exportTransactions = async (req, res) => {
 	}
 };
 
-/**
- * Get wallet statement (monthly summary)
- */
 export const getWalletStatement = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -1131,9 +1588,6 @@ export const getWalletStatement = async (req, res) => {
 
 // ==================== SUB-ACCOUNTS (Savings Goals) ====================
 
-/**
- * Create sub-account (savings goal)
- */
 export const createSubAccount = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -1193,9 +1647,6 @@ export const createSubAccount = async (req, res) => {
 	}
 };
 
-/**
- * Get user's sub-accounts
- */
 export const getSubAccounts = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -1221,9 +1672,6 @@ export const getSubAccounts = async (req, res) => {
 	}
 };
 
-/**
- * Fund sub-account from main wallet
- */
 export const fundSubAccount = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -1301,9 +1749,6 @@ export const fundSubAccount = async (req, res) => {
 	}
 };
 
-/**
- * Withdraw from sub-account
- */
 export const withdrawFromSubAccount = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -1414,9 +1859,6 @@ export const withdrawFromSubAccount = async (req, res) => {
 	}
 };
 
-/**
- * Lock sub-account
- */
 export const lockSubAccount = async (req, res) => {
 	try {
 		const userId = req.user._id;
