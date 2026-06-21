@@ -1,57 +1,94 @@
-// models/UserGoal.js
+// backend/models/UserGoal.js
 import mongoose from "mongoose";
 
 const userGoalSchema = new mongoose.Schema({
-	userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+	userId: {
+		type: mongoose.Schema.Types.ObjectId,
+		ref: "User",
+		required: true,
+		index: true,
+	},
 	walletId: {
 		type: mongoose.Schema.Types.ObjectId,
-		ref: "Wallet",
+		ref: "AnchorWallet",
 		required: true,
 	},
-
-	// Goal details (NOT savings)
-	name: { type: String, required: true },
-	goalAmount: { type: Number, required: true, min: 0 },
-	allocatedAmount: { type: Number, default: 0, min: 0 },
-
-	// Auto-allocation (NOT auto-save)
+	name: {
+		type: String,
+		required: true,
+	},
+	goalAmount: {
+		type: Number,
+		required: true,
+		min: 0,
+	},
+	allocatedAmount: {
+		type: Number,
+		default: 0,
+		min: 0,
+	},
+	lockType: {
+		type: String,
+		enum: ["Flexible", "Soft Lock", "Hard Lock"],
+		default: "Flexible",
+	},
+	icon: {
+		type: String,
+		default: "💰",
+	},
+	color: {
+		type: String,
+		default: "#4F46E5",
+	},
+	subAccountId: {
+		type: String,
+		default: null,
+	},
 	allocationSchedule: {
 		frequency: {
 			type: String,
-			enum: ["none", "daily", "weekly", "bi-weekly", "monthly"],
-			default: "none",
+			enum: ["daily", "weekly", "monthly", "bi-weekly", "none"],
+			default: "monthly",
 		},
-		amount: { type: Number, default: 0, min: 0 },
-		autoAllocateEnabled: { type: Boolean, default: false },
+		amount: {
+			type: Number,
+			default: 0,
+		},
+		autoAllocateEnabled: {
+			type: Boolean,
+			default: false,
+		},
 	},
-
-	// Commitment feature (NOT lock)
 	commitmentSettings: {
-		enabled: { type: Boolean, default: false },
-		releaseDate: { type: Date, default: null },
-		committedAt: { type: Date, default: null },
-		originalGoalAmount: { type: Number, default: null },
+		enabled: {
+			type: Boolean,
+			default: false,
+		},
+		releaseDate: {
+			type: Date,
+			default: null,
+		},
+		committedAt: {
+			type: Date,
+			default: null,
+		},
+		originalGoalAmount: {
+			type: Number,
+			default: null,
+		},
 	},
-
-	createdAt: { type: Date, default: Date.now },
-	updatedAt: { type: Date, default: Date.now },
+	createdAt: {
+		type: Date,
+		default: Date.now,
+	},
+	updatedAt: {
+		type: Date,
+		default: Date.now,
+	},
 });
 
-// Virtual for commitment status
-userGoalSchema.virtual("isCommitted").get(function () {
-	return (
-		this.commitmentSettings.enabled &&
-		this.commitmentSettings.releaseDate &&
-		new Date() < this.commitmentSettings.releaseDate
-	);
-});
+// ✅ Check if model already exists before compiling
+const UserGoal =
+	mongoose.models.UserGoal || mongoose.model("UserGoal", userGoalSchema);
 
-// Virtual for early release eligibility
-userGoalSchema.virtual("canReleaseEarly").get(function () {
-	return (
-		!this.commitmentSettings.enabled ||
-		new Date() >= this.commitmentSettings.releaseDate
-	);
-});
-
-export default mongoose.model("UserGoal", userGoalSchema);
+export default UserGoal;
