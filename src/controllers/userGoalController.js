@@ -44,6 +44,8 @@ const getMainWallet = async (userId) => {
 /**
  * Get or create goal sub-account
  */
+// controllers/userGoalController.js - Fix getOrCreateGoalSubAccount
+
 const getOrCreateGoalSubAccount = async (userId, goal) => {
 	let subAccount = await AnchorSubAccount.findOne({
 		userId,
@@ -52,6 +54,12 @@ const getOrCreateGoalSubAccount = async (userId, goal) => {
 
 	if (!subAccount) {
 		const mainWallet = await getMainWallet(userId);
+
+		// ✅ FIX: Only use valid frequency values
+		const frequency = goal.allocationSchedule?.frequency || "monthly";
+		const validFrequency = ["daily", "weekly", "monthly"].includes(frequency)
+			? frequency
+			: "monthly";
 
 		subAccount = await AnchorSubAccount.create({
 			userId,
@@ -64,7 +72,7 @@ const getOrCreateGoalSubAccount = async (userId, goal) => {
 			autoSave: {
 				enabled: goal.allocationSchedule?.autoAllocateEnabled || false,
 				amount: goal.allocationSchedule?.amount || 0,
-				frequency: goal.allocationSchedule?.frequency || "monthly",
+				frequency: validFrequency, // ✅ Always use a valid enum value
 				dayOfMonth: 1,
 			},
 			lockSettings: {
@@ -248,6 +256,8 @@ export const getGoalById = async (req, res) => {
 /**
  * Create a new goal with Anchor sub-account
  */
+// controllers/userGoalController.js - Fix createGoal
+
 export const createGoal = async (req, res) => {
 	try {
 		const {
@@ -265,6 +275,12 @@ export const createGoal = async (req, res) => {
 		// Get main wallet
 		const wallet = await getMainWallet(req.user._id);
 
+		// ✅ FIX: Convert frequency to valid enum value
+		let validFrequency = "monthly";
+		if (frequency && ["daily", "weekly", "monthly"].includes(frequency)) {
+			validFrequency = frequency;
+		}
+
 		// Create goal
 		const goal = new UserGoal({
 			userId: req.user._id,
@@ -275,7 +291,7 @@ export const createGoal = async (req, res) => {
 			icon,
 			color,
 			allocationSchedule: {
-				frequency: frequency || "none",
+				frequency: validFrequency, // ✅ Use valid frequency
 				amount: autoAllocateAmount || 0,
 				autoAllocateEnabled: autoAllocateEnabled || false,
 			},
