@@ -32,7 +32,6 @@ const getOrCreateGroupSubAccount = async (userId, group) => {
 	});
 
 	if (!subAccount) {
-		// Get main wallet as parent
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -77,7 +76,168 @@ const getOrCreateGroupSubAccount = async (userId, group) => {
 	return subAccount;
 };
 
-// ==================== CREATE GROUP ====================
+/**
+ * Process payout for a group
+ */
+const processPayout = async (groupId) => {
+	try {
+		const group = await GroupSavings.findById(groupId);
+		if (!group) return;
+
+		let payoutMemberId = null;
+
+		if (group.payoutOrder === "sequential") {
+			const paidMembers = await GroupPayout.find({
+				groupId: group._id,
+				cycle: group.currentCycle,
+			});
+
+			const members = await GroupMember.find({
+				groupId: group._id,
+				status: "active",
+			}).sort({ joinedAt: 1 });
+
+			const paidIds = paidMembers.map((p) => p.memberId.toString());
+			for (const member of members) {
+				if (!paidIds.includes(member.userId.toString())) {
+					payoutMemberId = member.userId;
+					break;
+				}
+			}
+		} else if (group.payoutOrder === "random") {
+			const members = await GroupMember.find({
+				groupId: group._id,
+				status: "active",
+			});
+			const randomIndex = Math.floor(Math.random() * members.length);
+			payoutMemberId = members[randomIndex].userId;
+		} else if (
+			group.payoutOrder === "fixed" &&
+			group.payoutSchedule?.length > 0
+		) {
+			const currentIndex =
+				(group.currentCycle - 1) % group.payoutSchedule.length;
+			payoutMemberId = group.payoutSchedule[currentIndex];
+		}
+
+		if (!payoutMemberId) {
+			console.log("No eligible member for payout this cycle");
+			return;
+		}
+
+		const subAccount = await AnchorSubAccount.findOne({
+			userId: group.createdBy,
+			subAccountId: group.subAccountId,
+		});
+
+		if (!subAccount || subAccount.balance === 0) {
+			console.log("No funds in group account");
+			return;
+		}
+
+		const payoutAmount = group.contributionAmount * group.memberCount;
+
+		if (subAccount.balance < payoutAmount) {
+			console.log(
+				`Insufficient funds: ${subAccount.balance} < ${payoutAmount}`,
+			);
+			return;
+		}
+
+		const recipientWallet = await AnchorWallet.findOne({
+			userId: payoutMemberId,
+			walletType: "main",
+		});
+
+		if (!recipientWallet) {
+			console.log("Recipient wallet not found");
+			return;
+		}
+
+		subAccount.balance -= payoutAmount;
+		await subAccount.save();
+
+		recipientWallet.balance += payoutAmount;
+		recipientWallet.available =
+			recipientWallet.balance - (recipientWallet.allocated || 0);
+		await recipientWallet.save();
+
+		const payout = new GroupPayout({
+			groupId: group._id,
+			cycle: group.currentCycle,
+			memberId: payoutMemberId,
+			amount: payoutAmount,
+			status: "completed",
+			paidAt: new Date(),
+			transactionId: `payout_${Date.now()}`,
+		});
+
+		await payout.save();
+
+		const senderWallet = await AnchorWallet.findOne({
+			userId: group.createdBy,
+			walletType: "main",
+		});
+
+		if (senderWallet) {
+			await AnchorTransaction.create({
+				userId: payoutMemberId,
+				anchorCustomerId: recipientWallet.anchorCustomerId,
+				walletId: recipientWallet._id,
+				amount: payoutAmount,
+				currency: "NGN",
+				type: "credit",
+				category: "group_payout",
+				status: "success",
+				description: `Payout from group: ${group.name} (Cycle ${group.currentCycle})`,
+				source: "sub_account",
+				destination: "wallet",
+				metadata: {
+					groupId: group._id,
+					groupName: group.name,
+					cycle: group.currentCycle,
+					payoutId: payout._id,
+					isGroupPayout: true,
+				},
+			});
+		}
+
+		await GroupMember.updateMany(
+			{ groupId: group._id },
+			{
+				$set: {
+					"cycleStatus.paid": false,
+					"cycleStatus.paidAt": null,
+					"cycleStatus.amountPaid": 0,
+				},
+				$inc: { "cycleStatus.cycle": 1 },
+			},
+		);
+
+		group.currentCycle += 1;
+		await group.save();
+
+		await sendPushToUser(
+			payoutMemberId,
+			"🎉 You Received a Payout!",
+			`₦${payoutAmount.toLocaleString()} paid out from "${group.name}" (Cycle ${group.currentCycle - 1})`,
+			{
+				type: "group_payout",
+				groupId: group._id,
+				amount: payoutAmount,
+				cycle: group.currentCycle - 1,
+			},
+		);
+
+		console.log(
+			`✅ Payout completed: ₦${payoutAmount} to user ${payoutMemberId}`,
+		);
+	} catch (err) {
+		console.error("Process payout error:", err);
+	}
+};
+
+// ==================== GROUP MANAGEMENT ====================
 
 export const createGroup = async (req, res) => {
 	try {
@@ -88,22 +248,20 @@ export const createGroup = async (req, res) => {
 			frequency = "weekly",
 			contributionAmount,
 			maxMembers = 10,
-			payoutOrder = "sequential", // sequential, random, or fixed
-			payoutSchedule, // array of user IDs or "random"
+			payoutOrder = "sequential",
+			payoutSchedule,
 			isPrivate = false,
 			inviteOnly = false,
 			icon = "👥",
 			color = "#4F46E5",
 		} = req.body;
 
-		// Validate
 		if (!name || !contributionAmount || contributionAmount <= 0) {
 			return res.status(400).json({
 				error: "Group name and contribution amount are required",
 			});
 		}
 
-		// Check if user already has a group with same name
 		const existing = await GroupSavings.findOne({
 			createdBy: userId,
 			name: { $regex: new RegExp(`^${name}$`, "i") },
@@ -116,7 +274,6 @@ export const createGroup = async (req, res) => {
 			});
 		}
 
-		// Get user's wallet
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -126,7 +283,6 @@ export const createGroup = async (req, res) => {
 			return res.status(404).json({ error: "Wallet not found" });
 		}
 
-		// Generate unique group code
 		let groupCode = generateGroupCode();
 		let exists = await GroupSavings.findOne({ groupCode });
 		while (exists) {
@@ -134,7 +290,6 @@ export const createGroup = async (req, res) => {
 			exists = await GroupSavings.findOne({ groupCode });
 		}
 
-		// Create group
 		const group = new GroupSavings({
 			name,
 			description,
@@ -156,10 +311,8 @@ export const createGroup = async (req, res) => {
 
 		await group.save();
 
-		// Create group sub-account
 		const subAccount = await getOrCreateGroupSubAccount(userId, group);
 
-		// Add creator as first member
 		const member = new GroupMember({
 			groupId: group._id,
 			userId: userId,
@@ -176,7 +329,6 @@ export const createGroup = async (req, res) => {
 
 		await member.save();
 
-		// Send notification
 		await sendPushToUser(
 			userId,
 			"👥 Group Savings Created!",
@@ -207,7 +359,166 @@ export const createGroup = async (req, res) => {
 	}
 };
 
-// ==================== JOIN GROUP ====================
+export const getGroupDetails = async (req, res) => {
+	try {
+		const { groupId } = req.params;
+		const userId = req.user._id;
+
+		const group = await GroupSavings.findOne({
+			_id: groupId,
+			status: "active",
+		});
+
+		if (!group) {
+			return res.status(404).json({ error: "Group not found" });
+		}
+
+		const member = await GroupMember.findOne({
+			groupId: group._id,
+			userId,
+			status: "active",
+		});
+
+		if (!member) {
+			return res
+				.status(403)
+				.json({ error: "You are not a member of this group" });
+		}
+
+		const members = await GroupMember.find({
+			groupId: group._id,
+			status: "active",
+		}).populate("userId", "fullName email profileImage");
+
+		const contributions = await GroupContribution.find({
+			groupId: group._id,
+		})
+			.sort({ createdAt: -1 })
+			.limit(20);
+
+		const subAccount = await AnchorSubAccount.findOne({
+			userId: group.createdBy,
+			subAccountId: group.subAccountId,
+		});
+
+		res.status(200).json({
+			success: true,
+			data: {
+				group,
+				members,
+				contributions,
+				balance: subAccount?.balance || 0,
+				isAdmin: group.createdBy.toString() === userId.toString(),
+				memberStatus: member,
+				totalMembers: members.length,
+			},
+		});
+	} catch (err) {
+		console.error("Get group details error:", err);
+		res.status(500).json({ error: err.message });
+	}
+};
+
+export const getUserGroups = async (req, res) => {
+	try {
+		const userId = req.user._id;
+
+		const groupMemberships = await GroupMember.find({
+			userId,
+			status: "active",
+		}).populate("groupId");
+
+		const groups = groupMemberships
+			.filter((gm) => gm.groupId)
+			.map((gm) => ({
+				...gm.groupId.toObject(),
+				role: gm.role,
+				joinedAt: gm.joinedAt,
+				totalContributed: gm.totalContributed,
+				cycleStatus: gm.cycleStatus,
+			}));
+
+		const groupsWithBalances = await Promise.all(
+			groups.map(async (group) => {
+				const subAccount = await AnchorSubAccount.findOne({
+					userId: group.createdBy,
+					subAccountId: group.subAccountId,
+				});
+				return {
+					...group,
+					balance: subAccount?.balance || 0,
+				};
+			}),
+		);
+
+		res.status(200).json({
+			success: true,
+			data: groupsWithBalances,
+		});
+	} catch (err) {
+		console.error("Get user groups error:", err);
+		res.status(500).json({ error: err.message });
+	}
+};
+
+export const updateGroup = async (req, res) => {
+	try {
+		const { groupId } = req.params;
+		const {
+			name,
+			description,
+			maxMembers,
+			payoutOrder,
+			payoutSchedule,
+			icon,
+			color,
+		} = req.body;
+
+		const group = await GroupSavings.findOne({
+			_id: groupId,
+			status: "active",
+		});
+
+		if (!group) {
+			return res.status(404).json({ error: "Group not found" });
+		}
+
+		const member = await GroupMember.findOne({
+			groupId: group._id,
+			userId: req.user._id,
+			role: "admin",
+			status: "active",
+		});
+
+		if (!member) {
+			return res
+				.status(403)
+				.json({ error: "Only admins can update the group" });
+		}
+
+		if (name) group.name = name;
+		if (description !== undefined) group.description = description;
+		if (maxMembers) group.maxMembers = maxMembers;
+		if (payoutOrder) group.payoutOrder = payoutOrder;
+		if (payoutSchedule) group.payoutSchedule = payoutSchedule;
+		if (icon) group.icon = icon;
+		if (color) group.color = color;
+
+		group.updatedAt = new Date();
+		await group.save();
+
+		res.status(200).json({
+			success: true,
+			message: "Group updated successfully",
+			data: group,
+		});
+	} catch (err) {
+		console.error("Update group error:", err);
+		res.status(500).json({ error: err.message });
+	}
+};
+
+// ==================== MEMBERSHIP ====================
 
 export const joinGroup = async (req, res) => {
 	try {
@@ -218,7 +529,6 @@ export const joinGroup = async (req, res) => {
 			return res.status(400).json({ error: "Group code is required" });
 		}
 
-		// Find group
 		const group = await GroupSavings.findOne({
 			groupCode: groupCode.toUpperCase(),
 			status: "active",
@@ -228,7 +538,6 @@ export const joinGroup = async (req, res) => {
 			return res.status(404).json({ error: "Group not found" });
 		}
 
-		// Check if already a member
 		const existingMember = await GroupMember.findOne({
 			groupId: group._id,
 			userId,
@@ -241,7 +550,6 @@ export const joinGroup = async (req, res) => {
 			});
 		}
 
-		// Check if group is full
 		const memberCount = await GroupMember.countDocuments({
 			groupId: group._id,
 			status: "active",
@@ -253,7 +561,6 @@ export const joinGroup = async (req, res) => {
 			});
 		}
 
-		// Add member
 		const member = new GroupMember({
 			groupId: group._id,
 			userId,
@@ -270,11 +577,9 @@ export const joinGroup = async (req, res) => {
 
 		await member.save();
 
-		// Update group member count
 		group.memberCount = memberCount + 1;
 		await group.save();
 
-		// Send notification
 		await sendPushToUser(
 			userId,
 			"🎉 Joined Group!",
@@ -286,7 +591,6 @@ export const joinGroup = async (req, res) => {
 			},
 		);
 
-		// Notify admin
 		await sendPushToUser(
 			group.createdBy,
 			"👤 New Member Joined",
@@ -313,18 +617,11 @@ export const joinGroup = async (req, res) => {
 	}
 };
 
-// ==================== CONTRIBUTE TO GROUP ====================
-
-export const contributeToGroup = async (req, res) => {
+export const leaveGroup = async (req, res) => {
 	try {
 		const userId = req.user._id;
-		const { groupId, amount } = req.body;
+		const { groupId } = req.params;
 
-		if (!amount || amount <= 0) {
-			return res.status(400).json({ error: "Valid amount required" });
-		}
-
-		// Find group
 		const group = await GroupSavings.findOne({
 			_id: groupId,
 			status: "active",
@@ -334,7 +631,6 @@ export const contributeToGroup = async (req, res) => {
 			return res.status(404).json({ error: "Group not found" });
 		}
 
-		// Check if user is a member
 		const member = await GroupMember.findOne({
 			groupId: group._id,
 			userId,
@@ -347,7 +643,213 @@ export const contributeToGroup = async (req, res) => {
 				.json({ error: "You are not a member of this group" });
 		}
 
-		// Get user's wallet
+		const adminCount = await GroupMember.countDocuments({
+			groupId: group._id,
+			role: "admin",
+			status: "active",
+		});
+
+		if (member.role === "admin" && adminCount === 1) {
+			return res.status(400).json({
+				error: "You are the only admin. Assign another admin before leaving.",
+			});
+		}
+
+		if (member.cycleStatus?.paid) {
+			return res.status(400).json({
+				error:
+					"You have already contributed this cycle. Wait for payout or request refund.",
+			});
+		}
+
+		member.status = "inactive";
+		member.leftAt = new Date();
+		await member.save();
+
+		const memberCount = await GroupMember.countDocuments({
+			groupId: group._id,
+			status: "active",
+		});
+		group.memberCount = memberCount;
+		await group.save();
+
+		await sendPushToUser(
+			userId,
+			"👋 Left Group",
+			`You have left "${group.name}"`,
+			{
+				type: "group_left",
+				groupId: group._id,
+			},
+		);
+
+		res.status(200).json({
+			success: true,
+			message: "Left group successfully",
+		});
+	} catch (err) {
+		console.error("Leave group error:", err);
+		res.status(500).json({ error: err.message });
+	}
+};
+
+export const getGroupMembers = async (req, res) => {
+	try {
+		const { groupId } = req.params;
+		const userId = req.user._id;
+
+		const group = await GroupSavings.findOne({
+			_id: groupId,
+			status: "active",
+		});
+
+		if (!group) {
+			return res.status(404).json({ error: "Group not found" });
+		}
+
+		const member = await GroupMember.findOne({
+			groupId: group._id,
+			userId,
+			status: "active",
+		});
+
+		if (!member) {
+			return res
+				.status(403)
+				.json({ error: "You are not a member of this group" });
+		}
+
+		const members = await GroupMember.find({
+			groupId: group._id,
+			status: "active",
+		}).populate("userId", "fullName email profileImage");
+
+		res.status(200).json({
+			success: true,
+			data: members,
+		});
+	} catch (err) {
+		console.error("Get group members error:", err);
+		res.status(500).json({ error: err.message });
+	}
+};
+
+export const removeMember = async (req, res) => {
+	try {
+		const { groupId, memberId } = req.params;
+
+		const group = await GroupSavings.findOne({
+			_id: groupId,
+			status: "active",
+		});
+
+		if (!group) {
+			return res.status(404).json({ error: "Group not found" });
+		}
+
+		const admin = await GroupMember.findOne({
+			groupId: group._id,
+			userId: req.user._id,
+			role: "admin",
+			status: "active",
+		});
+
+		if (!admin) {
+			return res.status(403).json({ error: "Only admins can remove members" });
+		}
+
+		if (req.user._id.toString() === memberId) {
+			return res.status(400).json({ error: "Cannot remove yourself" });
+		}
+
+		const memberToRemove = await GroupMember.findOne({
+			groupId: group._id,
+			userId: memberId,
+			status: "active",
+		});
+
+		if (!memberToRemove) {
+			return res.status(404).json({ error: "Member not found" });
+		}
+
+		if (memberToRemove.role === "admin") {
+			const adminCount = await GroupMember.countDocuments({
+				groupId: group._id,
+				role: "admin",
+				status: "active",
+			});
+
+			if (adminCount <= 1) {
+				return res.status(400).json({
+					error: "Cannot remove the only admin. Assign another admin first.",
+				});
+			}
+		}
+
+		memberToRemove.status = "inactive";
+		memberToRemove.leftAt = new Date();
+		await memberToRemove.save();
+
+		const memberCount = await GroupMember.countDocuments({
+			groupId: group._id,
+			status: "active",
+		});
+		group.memberCount = memberCount;
+		await group.save();
+
+		await sendPushToUser(
+			memberId,
+			"👥 Removed from Group",
+			`You have been removed from "${group.name}"`,
+			{
+				type: "group_member_removed",
+				groupId: group._id,
+				groupName: group.name,
+			},
+		);
+
+		res.status(200).json({
+			success: true,
+			message: "Member removed successfully",
+		});
+	} catch (err) {
+		console.error("Remove member error:", err);
+		res.status(500).json({ error: err.message });
+	}
+};
+
+// ==================== CONTRIBUTIONS ====================
+
+export const contributeToGroup = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { groupId, amount } = req.body;
+
+		if (!amount || amount <= 0) {
+			return res.status(400).json({ error: "Valid amount required" });
+		}
+
+		const group = await GroupSavings.findOne({
+			_id: groupId,
+			status: "active",
+		});
+
+		if (!group) {
+			return res.status(404).json({ error: "Group not found" });
+		}
+
+		const member = await GroupMember.findOne({
+			groupId: group._id,
+			userId,
+			status: "active",
+		});
+
+		if (!member) {
+			return res
+				.status(403)
+				.json({ error: "You are not a member of this group" });
+		}
+
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -365,17 +867,14 @@ export const contributeToGroup = async (req, res) => {
 			});
 		}
 
-		// Get or create group sub-account
 		const subAccount = await getOrCreateGroupSubAccount(userId, group);
 
-		// Transfer from wallet to group sub-account
 		wallet.balance -= amount;
 		subAccount.balance += amount;
 		wallet.available = wallet.balance - (wallet.allocated || 0);
 		await wallet.save();
 		await subAccount.save();
 
-		// Update member contribution
 		member.totalContributed += amount;
 		member.cycleStatus = {
 			cycle: group.currentCycle,
@@ -386,7 +885,6 @@ export const contributeToGroup = async (req, res) => {
 		};
 		await member.save();
 
-		// Create contribution record
 		const contribution = new GroupContribution({
 			groupId: group._id,
 			memberId: userId,
@@ -403,11 +901,9 @@ export const contributeToGroup = async (req, res) => {
 
 		await contribution.save();
 
-		// Update group total
 		group.totalContributions += amount;
 		await group.save();
 
-		// Create transaction record
 		await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: wallet.anchorCustomerId,
@@ -429,7 +925,6 @@ export const contributeToGroup = async (req, res) => {
 			},
 		});
 
-		// Check if all members have paid for this cycle
 		const members = await GroupMember.find({
 			groupId: group._id,
 			status: "active",
@@ -438,11 +933,9 @@ export const contributeToGroup = async (req, res) => {
 		const allPaid = members.every((m) => m.cycleStatus?.paid === true);
 
 		if (allPaid) {
-			// Trigger payout
 			await processPayout(group._id);
 		}
 
-		// Send notification
 		await sendPushToUser(
 			userId,
 			"💰 Contribution Successful!",
@@ -472,182 +965,10 @@ export const contributeToGroup = async (req, res) => {
 	}
 };
 
-// ==================== PROCESS PAYOUT ====================
-
-const processPayout = async (groupId) => {
-	try {
-		const group = await GroupSavings.findById(groupId);
-		if (!group) return;
-
-		// Determine who gets paid this cycle
-		let payoutMemberId = null;
-
-		if (group.payoutOrder === "sequential") {
-			const paidMembers = await GroupPayout.find({
-				groupId: group._id,
-				cycle: group.currentCycle,
-			});
-
-			const members = await GroupMember.find({
-				groupId: group._id,
-				status: "active",
-			}).sort({ joinedAt: 1 });
-
-			// Find next member who hasn't been paid this cycle
-			const paidIds = paidMembers.map((p) => p.memberId.toString());
-			for (const member of members) {
-				if (!paidIds.includes(member.userId.toString())) {
-					payoutMemberId = member.userId;
-					break;
-				}
-			}
-		} else if (group.payoutOrder === "random") {
-			const members = await GroupMember.find({
-				groupId: group._id,
-				status: "active",
-			});
-			const randomIndex = Math.floor(Math.random() * members.length);
-			payoutMemberId = members[randomIndex].userId;
-		} else if (
-			group.payoutOrder === "fixed" &&
-			group.payoutSchedule?.length > 0
-		) {
-			const currentIndex =
-				(group.currentCycle - 1) % group.payoutSchedule.length;
-			payoutMemberId = group.payoutSchedule[currentIndex];
-		}
-
-		if (!payoutMemberId) {
-			console.log("No eligible member for payout this cycle");
-			return;
-		}
-
-		// Get group sub-account
-		const subAccount = await AnchorSubAccount.findOne({
-			userId: group.createdBy,
-			subAccountId: group.subAccountId,
-		});
-
-		if (!subAccount || subAccount.balance === 0) {
-			console.log("No funds in group account");
-			return;
-		}
-
-		const payoutAmount = group.contributionAmount * group.memberCount;
-
-		if (subAccount.balance < payoutAmount) {
-			console.log(
-				`Insufficient funds: ${subAccount.balance} < ${payoutAmount}`,
-			);
-			return;
-		}
-
-		// Get recipient wallet
-		const recipientWallet = await AnchorWallet.findOne({
-			userId: payoutMemberId,
-			walletType: "main",
-		});
-
-		if (!recipientWallet) {
-			console.log("Recipient wallet not found");
-			return;
-		}
-
-		// Transfer from group sub-account to recipient wallet
-		subAccount.balance -= payoutAmount;
-		await subAccount.save();
-
-		recipientWallet.balance += payoutAmount;
-		recipientWallet.available =
-			recipientWallet.balance - (recipientWallet.allocated || 0);
-		await recipientWallet.save();
-
-		// Create payout record
-		const payout = new GroupPayout({
-			groupId: group._id,
-			cycle: group.currentCycle,
-			memberId: payoutMemberId,
-			amount: payoutAmount,
-			status: "completed",
-			paidAt: new Date(),
-			transactionId: `payout_${Date.now()}`,
-		});
-
-		await payout.save();
-
-		// Create transaction record
-		const senderWallet = await AnchorWallet.findOne({
-			userId: group.createdBy,
-			walletType: "main",
-		});
-
-		if (senderWallet) {
-			await AnchorTransaction.create({
-				userId: payoutMemberId,
-				anchorCustomerId: recipientWallet.anchorCustomerId,
-				walletId: recipientWallet._id,
-				amount: payoutAmount,
-				currency: "NGN",
-				type: "credit",
-				category: "group_payout",
-				status: "success",
-				description: `Payout from group: ${group.name} (Cycle ${group.currentCycle})`,
-				source: "sub_account",
-				destination: "wallet",
-				metadata: {
-					groupId: group._id,
-					groupName: group.name,
-					cycle: group.currentCycle,
-					payoutId: payout._id,
-					isGroupPayout: true,
-				},
-			});
-		}
-
-		// Reset member cycle statuses
-		await GroupMember.updateMany(
-			{ groupId: group._id },
-			{
-				$set: {
-					"cycleStatus.paid": false,
-					"cycleStatus.paidAt": null,
-					"cycleStatus.amountPaid": 0,
-				},
-				$inc: { "cycleStatus.cycle": 1 },
-			},
-		);
-
-		// Increment cycle
-		group.currentCycle += 1;
-		await group.save();
-
-		// Send notification to recipient
-		await sendPushToUser(
-			payoutMemberId,
-			"🎉 You Received a Payout!",
-			`₦${payoutAmount.toLocaleString()} paid out from "${group.name}" (Cycle ${group.currentCycle - 1})`,
-			{
-				type: "group_payout",
-				groupId: group._id,
-				amount: payoutAmount,
-				cycle: group.currentCycle - 1,
-			},
-		);
-
-		console.log(
-			`✅ Payout completed: ₦${payoutAmount} to user ${payoutMemberId}`,
-		);
-	} catch (err) {
-		console.error("Process payout error:", err);
-	}
-};
-
-// ==================== GET GROUP DETAILS ====================
-
-export const getGroupDetails = async (req, res) => {
+export const getGroupContributions = async (req, res) => {
 	try {
 		const { groupId } = req.params;
-		const userId = req.user._id;
+		const { limit = 50, offset = 0 } = req.query;
 
 		const group = await GroupSavings.findOne({
 			_id: groupId,
@@ -658,106 +979,80 @@ export const getGroupDetails = async (req, res) => {
 			return res.status(404).json({ error: "Group not found" });
 		}
 
-		// Check if user is a member
-		const member = await GroupMember.findOne({
-			groupId: group._id,
-			userId,
-			status: "active",
-		});
-
-		if (!member) {
-			return res
-				.status(403)
-				.json({ error: "You are not a member of this group" });
-		}
-
-		// Get all members
-		const members = await GroupMember.find({
-			groupId: group._id,
-			status: "active",
-		}).populate("userId", "fullName email profileImage");
-
-		// Get contributions
 		const contributions = await GroupContribution.find({
 			groupId: group._id,
 		})
 			.sort({ createdAt: -1 })
-			.limit(20);
+			.skip(parseInt(offset))
+			.limit(parseInt(limit))
+			.populate("memberId", "fullName email profileImage");
 
-		// Get group balance
-		const subAccount = await AnchorSubAccount.findOne({
-			userId: group.createdBy,
-			subAccountId: group.subAccountId,
+		const total = await GroupContribution.countDocuments({
+			groupId: group._id,
 		});
 
 		res.status(200).json({
 			success: true,
-			data: {
-				group,
-				members,
-				contributions,
-				balance: subAccount?.balance || 0,
-				isAdmin: group.createdBy.toString() === userId.toString(),
-				memberStatus: member,
-				totalMembers: members.length,
+			data: contributions,
+			pagination: {
+				limit: parseInt(limit),
+				offset: parseInt(offset),
+				total,
+				hasMore: offset + limit < total,
 			},
 		});
 	} catch (err) {
-		console.error("Get group details error:", err);
+		console.error("Get group contributions error:", err);
 		res.status(500).json({ error: err.message });
 	}
 };
 
-// ==================== GET USER'S GROUPS ====================
+// ==================== PAYOUTS ====================
 
-export const getUserGroups = async (req, res) => {
+export const getGroupPayouts = async (req, res) => {
 	try {
-		const userId = req.user._id;
+		const { groupId } = req.params;
+		const { limit = 50, offset = 0 } = req.query;
 
-		const groupMemberships = await GroupMember.find({
-			userId,
+		const group = await GroupSavings.findOne({
+			_id: groupId,
 			status: "active",
-		}).populate("groupId");
+		});
 
-		const groups = groupMemberships
-			.filter((gm) => gm.groupId)
-			.map((gm) => ({
-				...gm.groupId.toObject(),
-				role: gm.role,
-				joinedAt: gm.joinedAt,
-				totalContributed: gm.totalContributed,
-				cycleStatus: gm.cycleStatus,
-			}));
+		if (!group) {
+			return res.status(404).json({ error: "Group not found" });
+		}
 
-		// Get group balances
-		const groupsWithBalances = await Promise.all(
-			groups.map(async (group) => {
-				const subAccount = await AnchorSubAccount.findOne({
-					userId: group.createdBy,
-					subAccountId: group.subAccountId,
-				});
-				return {
-					...group,
-					balance: subAccount?.balance || 0,
-				};
-			}),
-		);
+		const payouts = await GroupPayout.find({
+			groupId: group._id,
+		})
+			.sort({ createdAt: -1 })
+			.skip(parseInt(offset))
+			.limit(parseInt(limit))
+			.populate("memberId", "fullName email profileImage");
+
+		const total = await GroupPayout.countDocuments({
+			groupId: group._id,
+		});
 
 		res.status(200).json({
 			success: true,
-			data: groupsWithBalances,
+			data: payouts,
+			pagination: {
+				limit: parseInt(limit),
+				offset: parseInt(offset),
+				total,
+				hasMore: offset + limit < total,
+			},
 		});
 	} catch (err) {
-		console.error("Get user groups error:", err);
+		console.error("Get group payouts error:", err);
 		res.status(500).json({ error: err.message });
 	}
 };
 
-// ==================== LEAVE GROUP ====================
-
-export const leaveGroup = async (req, res) => {
+export const processPayoutManually = async (req, res) => {
 	try {
-		const userId = req.user._id;
 		const { groupId } = req.params;
 
 		const group = await GroupSavings.findOne({
@@ -769,69 +1064,25 @@ export const leaveGroup = async (req, res) => {
 			return res.status(404).json({ error: "Group not found" });
 		}
 
-		// Check if user is a member
-		const member = await GroupMember.findOne({
+		const admin = await GroupMember.findOne({
 			groupId: group._id,
-			userId,
-			status: "active",
-		});
-
-		if (!member) {
-			return res
-				.status(403)
-				.json({ error: "You are not a member of this group" });
-		}
-
-		// Check if user is the only admin
-		const adminCount = await GroupMember.countDocuments({
-			groupId: group._id,
+			userId: req.user._id,
 			role: "admin",
 			status: "active",
 		});
 
-		if (member.role === "admin" && adminCount === 1) {
-			return res.status(400).json({
-				error: "You are the only admin. Assign another admin before leaving.",
-			});
+		if (!admin) {
+			return res.status(403).json({ error: "Only admins can process payouts" });
 		}
 
-		// Check if user has paid contributions in current cycle
-		if (member.cycleStatus?.paid) {
-			return res.status(400).json({
-				error:
-					"You have already contributed this cycle. Wait for payout or request refund.",
-			});
-		}
-
-		// Deactivate member
-		member.status = "inactive";
-		member.leftAt = new Date();
-		await member.save();
-
-		// Update group member count
-		const memberCount = await GroupMember.countDocuments({
-			groupId: group._id,
-			status: "active",
-		});
-		group.memberCount = memberCount;
-		await group.save();
-
-		await sendPushToUser(
-			userId,
-			"👋 Left Group",
-			`You have left "${group.name}"`,
-			{
-				type: "group_left",
-				groupId: group._id,
-			},
-		);
+		await processPayout(groupId);
 
 		res.status(200).json({
 			success: true,
-			message: "Left group successfully",
+			message: "Payout processed successfully",
 		});
 	} catch (err) {
-		console.error("Leave group error:", err);
+		console.error("Process payout manually error:", err);
 		res.status(500).json({ error: err.message });
 	}
 };
@@ -839,10 +1090,23 @@ export const leaveGroup = async (req, res) => {
 // ==================== EXPORT ====================
 
 export default {
+	// Group Management
 	createGroup,
-	joinGroup,
-	contributeToGroup,
 	getGroupDetails,
 	getUserGroups,
+	updateGroup,
+
+	// Membership
+	joinGroup,
 	leaveGroup,
+	getGroupMembers,
+	removeMember,
+
+	// Contributions
+	contributeToGroup,
+	getGroupContributions,
+
+	// Payouts
+	getGroupPayouts,
+	processPayoutManually,
 };
