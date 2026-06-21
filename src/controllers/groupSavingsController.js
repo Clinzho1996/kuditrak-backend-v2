@@ -237,7 +237,7 @@ const processPayout = async (groupId) => {
 
 // ==================== GROUP MANAGEMENT ====================
 
-// controllers/groupSavingsController.js - Fix createGroup response
+// controllers/groupSavingsController.js - Fix createGroup
 
 export const createGroup = async (req, res) => {
 	try {
@@ -278,7 +278,7 @@ export const createGroup = async (req, res) => {
 			});
 		}
 
-		// ✅ Check if user has a wallet
+		// Check if user has a wallet
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -333,23 +333,25 @@ export const createGroup = async (req, res) => {
 			console.error("❌ Sub-account error:", subError);
 		}
 
-		// Add creator as first member
+		// ✅ Add creator as first member with status "active"
 		const member = new GroupMember({
 			groupId: group._id,
 			userId: userId,
 			role: "admin",
-			status: "active",
+			status: "active", // ✅ Ensure this is "active", not "pending"
 			joinedAt: new Date(),
 			totalContributed: 0,
 			cycleStatus: {
 				cycle: 1,
 				paid: false,
 				amountDue: contributionAmount,
+				paidAt: null,
+				amountPaid: 0,
 			},
 		});
 
 		await member.save();
-		console.log("✅ Member added:", member._id);
+		console.log("✅ Member added with status:", member.status);
 
 		// Send notification
 		await sendPushToUser(
@@ -363,12 +365,13 @@ export const createGroup = async (req, res) => {
 			},
 		);
 
-		// ✅ Return the complete group data
+		// ✅ Return complete data
 		const groupData = {
 			...group.toObject(),
-			role: "admin",
+			role: member.role,
+			status: member.status,
 			joinedAt: member.joinedAt,
-			totalContributed: 0,
+			totalContributed: member.totalContributed,
 			cycleStatus: member.cycleStatus,
 		};
 
