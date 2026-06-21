@@ -456,51 +456,84 @@ export const getGroupDetails = async (req, res) => {
 	}
 };
 
+// controllers/groupSavingsController.js - Fix getUserGroups
+
 export const getUserGroups = async (req, res) => {
 	try {
 		const userId = req.user._id;
+
+		console.log("🔍 Fetching groups for user:", userId);
 
 		// ✅ Find all group memberships for the user
 		const groupMemberships = await GroupMember.find({
 			userId,
 			status: "active",
-		});
+		}).lean();
+
+		console.log(`📊 Found ${groupMemberships.length} memberships`);
+
+		if (groupMemberships.length === 0) {
+			return res.status(200).json({
+				success: true,
+				data: [],
+			});
+		}
+
+		// ✅ Extract group IDs safely
+		const groupIds = groupMemberships
+			.map((gm) => gm.groupId)
+			.filter((id) => id); // Remove any null/undefined
+
+		console.log(`📊 Group IDs:`, groupIds);
+
+		if (groupIds.length === 0) {
+			return res.status(200).json({
+				success: true,
+				data: [],
+			});
+		}
 
 		// ✅ Get the actual group data for each membership
-		const groupIds = groupMemberships.map((gm) => gm.groupId);
-
 		const groups = await GroupSavings.find({
 			_id: { $in: groupIds },
 			status: "active",
 		}).lean();
 
-		console.log(`📊 Found ${groups.length} groups for user ${userId}`);
+		console.log(`📊 Found ${groups.length} active groups`);
 
-		// ✅ Add membership info to each group
+		// ✅ Add membership info to each group safely
 		const groupsWithMembership = groups.map((group) => {
+			// Find the matching membership
 			const membership = groupMemberships.find(
-				(gm) => gm.groupId.toString() === group._id.toString(),
+				(gm) => gm.groupId && gm.groupId.toString() === group._id.toString(),
 			);
+
 			return {
 				...group,
 				role: membership?.role || "member",
-				joinedAt: membership?.joinedAt,
+				joinedAt: membership?.joinedAt || null,
 				totalContributed: membership?.totalContributed || 0,
 				cycleStatus: membership?.cycleStatus || {
-					cycle: group.currentCycle,
+					cycle: group.currentCycle || 1,
 					paid: false,
-					amountDue: group.contributionAmount,
+					amountDue: group.contributionAmount || 0,
 				},
 			};
 		});
+
+		console.log(`✅ Returning ${groupsWithMembership.length} groups for user`);
 
 		res.status(200).json({
 			success: true,
 			data: groupsWithMembership,
 		});
 	} catch (err) {
-		console.error("Get user groups error:", err);
-		res.status(500).json({ error: err.message });
+		console.error("❌ Get user groups error:", err);
+		res.status(500).json({
+			success: false,
+			error: err.message,
+			message: "Failed to fetch user groups",
+		});
 	}
 };
 
