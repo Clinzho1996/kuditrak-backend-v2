@@ -165,96 +165,75 @@ export const respondToRequest = async (req, res) => {
 		}
 
 		if (action === "approve") {
-			// ✅ TRANSFER MONEY - FIX HERE
-			const senderId = request.senderId._id;
-			const recipientId = request.recipientId._id;
+			// ✅ CORRECT FLOW: Money moves FROM Approver TO Requester
+			const requesterId = request.senderId._id; // Person who requested money (wants to receive)
+			const approverId = request.recipientId._id; // Person who is approving (will send money)
 			const amount = request.amount;
 
 			console.log(
-				`💰 Processing transfer: ₦${amount} from ${senderId} to ${recipientId}`,
+				`💰 Processing transfer: ₦${amount} from APPROVER (${approverId}) to REQUESTER (${requesterId})`,
 			);
 
-			// ✅ Get sender's wallet (the person who requested money)
-			const senderWallet = await AnchorWallet.findOne({
-				userId: senderId,
+			// ✅ Get wallets
+			const approverWallet = await AnchorWallet.findOne({
+				userId: approverId,
 				walletType: "main",
 			});
 
-			// ✅ Get recipient's wallet (the person who is approving)
-			const recipientWallet = await AnchorWallet.findOne({
-				userId: recipientId,
+			const requesterWallet = await AnchorWallet.findOne({
+				userId: requesterId,
 				walletType: "main",
 			});
 
-			if (!senderWallet) {
+			if (!approverWallet) {
 				return res.status(404).json({
-					error: "Sender wallet not found",
-					message: "The person who requested money doesn't have a wallet",
-				});
-			}
-
-			if (!recipientWallet) {
-				return res.status(404).json({
-					error: "Recipient wallet not found",
+					error: "Approver wallet not found",
 					message: "Your wallet not found",
 				});
 			}
 
-			// ✅ Check if sender has enough balance
-			if (senderWallet.balance < amount) {
+			if (!requesterWallet) {
+				return res.status(404).json({
+					error: "Requester wallet not found",
+					message: "The person who requested money doesn't have a wallet",
+				});
+			}
+
+			// ✅ Check if approver has enough balance
+			if (approverWallet.balance < amount) {
 				return res.status(400).json({
 					error: "Insufficient balance",
-					message: `${request.senderId.fullName} doesn't have enough balance to fulfill this request. Available: ₦${senderWallet.balance.toLocaleString()}`,
-					available: senderWallet.balance,
+					message: `You don't have enough balance to fulfill this request. Available: ₦${approverWallet.balance.toLocaleString()}`,
+					available: approverWallet.balance,
 					required: amount,
 				});
 			}
 
-			// ✅ Perform the transfer
-			// Deduct from sender (the requester)
-			senderWallet.balance -= amount;
-			senderWallet.available =
-				senderWallet.balance - (senderWallet.allocated || 0);
-			await senderWallet.save();
+			// ✅ Perform the transfer (CORRECT DIRECTION)
+			// DEBIT: Approver sends money (money leaves their wallet)
+			approverWallet.balance -= amount;
+			approverWallet.available =
+				approverWallet.balance - (approverWallet.allocated || 0);
+			await approverWallet.save();
 
-			// Add to recipient (the approver)
-			recipientWallet.balance += amount;
-			recipientWallet.available =
-				recipientWallet.balance - (recipientWallet.allocated || 0);
-			await recipientWallet.save();
+			// CREDIT: Requester receives money (money enters their wallet)
+			requesterWallet.balance += amount;
+			requesterWallet.available =
+				requesterWallet.balance - (requesterWallet.allocated || 0);
+			await requesterWallet.save();
 
-			console.log(`✅ Transfer complete: ₦${amount} moved`);
+			console.log(
+				`✅ Transfer complete: ₦${amount} moved from Approver to Requester`,
+			);
 
-			// ✅ Create transaction record for sender (debit)
+			// ✅ Create transaction for Approver (DEBIT - money sent)
 			await AnchorTransaction.create({
-				userId: senderId,
-				anchorCustomerId: senderWallet.anchorCustomerId,
-				walletId: senderWallet._id,
+				userId: approverId,
+				anchorCustomerId: approverWallet.anchorCustomerId,
+				walletId: approverWallet._id,
 				amount: amount,
 				currency: "NGN",
 				type: "debit",
-				category: "transfer",
-				status: "success",
-				description: `Money request approved by ${request.recipientId.fullName}`,
-				source: "request",
-				destination: "wallet",
-				metadata: {
-					requestId: request._id,
-					recipientId: recipientId,
-					recipientName: request.recipientId.fullName,
-					isRequestApproval: true,
-					reference: request.reference,
-				},
-			});
-
-			// ✅ Create transaction record for recipient (credit)
-			await AnchorTransaction.create({
-				userId: recipientId,
-				anchorCustomerId: recipientWallet.anchorCustomerId,
-				walletId: recipientWallet._id,
-				amount: amount,
-				currency: "NGN",
-				type: "credit",
 				category: "transfer",
 				status: "success",
 				description: `Money request from ${request.senderId.fullName} approved`,
@@ -262,10 +241,34 @@ export const respondToRequest = async (req, res) => {
 				destination: "wallet",
 				metadata: {
 					requestId: request._id,
-					senderId: senderId,
+					senderId: requesterId,
 					senderName: request.senderId.fullName,
 					isRequestApproval: true,
 					reference: request.reference,
+					direction: "sent", // ✅ Marks that money was sent
+				},
+			});
+
+			// ✅ Create transaction for Requester (CREDIT - money received)
+			await AnchorTransaction.create({
+				userId: requesterId,
+				anchorCustomerId: requesterWallet.anchorCustomerId,
+				walletId: requesterWallet._id,
+				amount: amount,
+				currency: "NGN",
+				type: "credit",
+				category: "transfer",
+				status: "success",
+				description: `Money request approved by ${request.recipientId.fullName}`,
+				source: "request",
+				destination: "wallet",
+				metadata: {
+					requestId: request._id,
+					recipientId: approverId,
+					recipientName: request.recipientId.fullName,
+					isRequestApproval: true,
+					reference: request.reference,
+					direction: "received", // ✅ Marks that money was received
 				},
 			});
 
@@ -274,50 +277,53 @@ export const respondToRequest = async (req, res) => {
 			request.respondedAt = new Date();
 			await request.save();
 
-			// ✅ Send push notification to sender
+			// ✅ Send push notification to Requester (they received money)
 			await sendPushToUser(
-				senderId,
-				"✅ Request Approved",
-				`${request.recipientId.fullName} approved your request for ₦${amount.toLocaleString()}`,
+				requesterId,
+				"💰 Money Received",
+				`${request.recipientId.fullName} approved your request and sent ₦${amount.toLocaleString()}`,
 				{
-					type: "request_approved",
+					type: "money_received",
 					requestId: request._id,
-					recipientId: recipientId,
+					senderId: approverId,
+					senderName: request.recipientId.fullName,
 					amount: amount,
-					newBalance: senderWallet.balance,
+					newBalance: requesterWallet.balance,
 				},
 			);
 
-			// ✅ Send push notification to recipient
+			// ✅ Send push notification to Approver (they sent money)
 			await sendPushToUser(
-				recipientId,
-				"💰 Money Sent",
+				approverId,
+				"💸 Money Sent",
 				`You sent ₦${amount.toLocaleString()} to ${request.senderId.fullName}`,
 				{
 					type: "money_sent",
 					amount: amount,
-					recipientId: senderId,
+					recipientId: requesterId,
 					recipientName: request.senderId.fullName,
-					newBalance: recipientWallet.balance,
+					newBalance: approverWallet.balance,
 				},
 			);
 
 			// ✅ Send email notifications
 			try {
-				const { sendRequestApprovedEmail, sendMoneySentEmail } =
-					await import("../utils/emailService.js");
+				const {
+					sendRequestApprovedEmail,
+					sendMoneySentEmail,
+					sendMoneyReceivedEmail,
+				} = await import("../utils/emailService.js");
 
-				// Send email to sender (requester) - they received the money
-				await sendRequestApprovedEmail({
-					requesterEmail: request.senderId.email,
-					requesterName: request.senderId.fullName,
-					approverName: request.recipientId.fullName,
+				// Email to Requester (they received money)
+				await sendMoneyReceivedEmail({
+					recipientEmail: request.senderId.email,
+					recipientName: request.senderId.fullName,
+					senderName: request.recipientId.fullName,
 					amount: amount,
-					requestId: request._id,
 					reference: request.reference,
 				});
 
-				// Send email to recipient (approver) - they sent the money
+				// Email to Approver (they sent money)
 				await sendMoneySentEmail({
 					senderEmail: request.recipientId.email,
 					senderName: request.recipientId.fullName,
@@ -331,23 +337,21 @@ export const respondToRequest = async (req, res) => {
 
 			res.json({
 				success: true,
-				message: `Request approved and ₦${amount.toLocaleString()} transferred successfully`,
+				message: `Request approved and ₦${amount.toLocaleString()} transferred to ${request.senderId.fullName}`,
 				request,
 				transfer: {
 					amount: amount,
-					from: request.senderId.fullName,
-					to: request.recipientId.fullName,
-					senderNewBalance: senderWallet.balance,
-					recipientNewBalance: recipientWallet.balance,
+					from: request.recipientId.fullName, // Approver
+					to: request.senderId.fullName, // Requester
+					approverNewBalance: approverWallet.balance,
+					requesterNewBalance: requesterWallet.balance,
 				},
 			});
 		} else if (action === "decline") {
-			// ✅ Simply decline the request - no money moves
 			request.status = "declined";
 			request.respondedAt = new Date();
 			await request.save();
 
-			// Send notification to sender
 			await sendPushToUser(
 				request.senderId._id,
 				"❌ Request Declined",
