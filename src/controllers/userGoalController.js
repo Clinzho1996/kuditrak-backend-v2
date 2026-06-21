@@ -559,23 +559,40 @@ export const updateGoal = async (req, res) => {
 	}
 };
 
-// controllers/userGoalController.js - Fixed deleteGoal
-
-// controllers/userGoalController.js - Fixed deleteGoal with Soft Lock penalty
+// controllers/userGoalController.js - Complete updated deleteGoal
 
 export const deleteGoal = async (req, res) => {
 	try {
 		const { id } = req.params;
 
+		console.log("🔵 Deleting goal:", id);
+
+		// Stop any scheduled auto-allocation jobs
 		if (scheduledJobs.has(id)) {
 			scheduledJobs.get(id).stop();
 			scheduledJobs.delete(id);
 		}
 
+		// Find the goal
 		const goal = await UserGoal.findOne({ _id: id, userId: req.user._id });
 
 		if (!goal) {
 			return res.status(404).json({ error: "Goal not found" });
+		}
+
+		// ✅ CRITICAL FIX: Determine effective lock type from BOTH fields
+		// The UI might show Soft Lock but lockType might be 'Flexible'
+		let effectiveLockType = goal.lockType || "Flexible";
+
+		// If commitmentSettings.enabled is true, it's locked regardless of lockType
+		if (goal.commitmentSettings?.enabled) {
+			// If lockType is 'Flexible' but commitment is enabled, it's actually Soft Lock
+			if (effectiveLockType === "Flexible") {
+				effectiveLockType = "Soft Lock";
+			}
+		} else {
+			// If commitment is disabled, it should be Flexible
+			effectiveLockType = "Flexible";
 		}
 
 		console.log("📊 Goal found:", {
@@ -583,7 +600,10 @@ export const deleteGoal = async (req, res) => {
 			name: goal.name,
 			allocatedAmount: goal.allocatedAmount,
 			subAccountId: goal.subAccountId,
-			lockType: goal.lockType,
+			storedLockType: goal.lockType,
+			commitmentEnabled: goal.commitmentSettings?.enabled,
+			effectiveLockType: effectiveLockType,
+			releaseDate: goal.commitmentSettings?.releaseDate,
 		});
 
 		// ✅ Initialize variables
@@ -623,19 +643,21 @@ export const deleteGoal = async (req, res) => {
 			available: wallet.available || 0,
 		});
 
-		// ✅ The total funds to refund is the goal's allocatedAmount
+		// ✅ Total funds to refund = sub-account balance + goal.allocatedAmount
 		const totalAllocatedFunds = subAccountBalance + (goal.allocatedAmount || 0);
 
 		console.log(
-			`💰 Total funds to refund: ₦${totalAllocatedFunds} (subAccount: ₦${subAccountBalance}, goal.allocatedAmount: ₦${goal.allocatedAmount})`,
+			`💰 Total funds to process: ₦${totalAllocatedFunds} (subAccount: ₦${subAccountBalance}, goal.allocatedAmount: ₦${goal.allocatedAmount})`,
 		);
 
+		// ✅ Check lock type (using effectiveLockType)
+		const isHardLock = effectiveLockType === "Hard Lock";
+		const isSoftLock = effectiveLockType === "Soft Lock";
+		const isLocked = isHardLock || isSoftLock;
+
+		// ✅ If there are funds, handle refund logic
 		if (totalAllocatedFunds > 0) {
 			refundAmount = totalAllocatedFunds;
-
-			// ✅ Check lock type
-			const isHardLock = goal.lockType === "Hard Lock";
-			const isSoftLock = goal.lockType === "Soft Lock";
 
 			// ✅ For Hard Lock: Check if target date has passed
 			if (isHardLock && goal.commitmentSettings?.releaseDate) {
@@ -643,6 +665,7 @@ export const deleteGoal = async (req, res) => {
 				const releaseDate = new Date(goal.commitmentSettings.releaseDate);
 
 				if (now < releaseDate) {
+					// Hard Lock - Cannot delete before release date
 					return res.status(400).json({
 						error: "Cannot delete this goal",
 						message: `This goal has a Hard Lock and cannot be deleted until ${releaseDate.toLocaleDateString()}.`,
@@ -655,19 +678,20 @@ export const deleteGoal = async (req, res) => {
 				}
 			}
 
-			// ✅ For Soft Lock: Apply 7% penalty on refund
+			// ✅ For Soft Lock: Apply 7% penalty on early withdrawal
 			if (isSoftLock && goal.commitmentSettings?.releaseDate) {
 				const now = new Date();
 				const releaseDate = new Date(goal.commitmentSettings.releaseDate);
 
 				if (now < releaseDate) {
+					// Early withdrawal - apply penalty
 					const penaltyRate = 0.07;
 					penaltyApplied = Math.round(totalAllocatedFunds * penaltyRate);
 					refundAmount = totalAllocatedFunds - penaltyApplied;
 					refundMessage = `7% penalty (₦${penaltyApplied.toLocaleString()}) applied for early withdrawal.`;
 					console.log(`⚠️ Soft lock penalty: ₦${penaltyApplied}`);
 
-					// ✅ CRITICAL: Collect the penalty
+					// ✅ Collect penalty to platform wallet
 					const platformWalletId = process.env.SYSTEM_BUCKET_ID;
 					if (platformWalletId) {
 						let platformWallet = await AnchorWallet.findOne({
@@ -690,13 +714,13 @@ export const deleteGoal = async (req, res) => {
 							console.log("✅ Platform wallet created:", platformWallet._id);
 						}
 
-						// ✅ Transfer penalty to platform wallet
+						// Transfer penalty to platform wallet
 						platformWallet.balance += penaltyApplied;
 						platformWallet.available =
 							platformWallet.balance - (platformWallet.allocated || 0);
 						await platformWallet.save();
 
-						// ✅ Create penalty transaction
+						// Create penalty transaction
 						await AnchorTransaction.create({
 							userId: req.user._id,
 							anchorCustomerId: wallet.anchorCustomerId,
@@ -715,7 +739,7 @@ export const deleteGoal = async (req, res) => {
 								penaltyAmount: penaltyApplied,
 								originalAmount: totalAllocatedFunds,
 								refundAmount: refundAmount,
-								lockType: goal.lockType,
+								lockType: effectiveLockType,
 							},
 						});
 
@@ -769,7 +793,7 @@ export const deleteGoal = async (req, res) => {
 					originalAmount: totalAllocatedFunds,
 					penaltyApplied: penaltyApplied,
 					refundAmount: refundAmount,
-					lockType: goal.lockType,
+					lockType: effectiveLockType,
 					deletedAt: new Date().toISOString(),
 				},
 			});
@@ -785,16 +809,18 @@ export const deleteGoal = async (req, res) => {
 
 		// ✅ Delete sub-account if exists
 		if (goal.subAccountId) {
-			await AnchorSubAccount.findOneAndDelete({
+			const deleted = await AnchorSubAccount.findOneAndDelete({
 				userId: req.user._id,
 				subAccountId: goal.subAccountId,
 			});
+			console.log(`🗑️ Sub-account deleted: ${deleted ? "Yes" : "No"}`);
 		}
 
 		// ✅ Delete the goal
 		await goal.deleteOne();
+		console.log("🗑️ Goal deleted");
 
-		// ✅ Send notification
+		// ✅ Send notification with refund details
 		let notificationBody = `Your goal "${goal.name}" has been deleted.`;
 		if (refundAmount > 0) {
 			notificationBody += ` ₦${Math.floor(refundAmount).toLocaleString()} has been refunded to your wallet.${penaltyApplied > 0 ? ` (₦${penaltyApplied.toLocaleString()} penalty applied)` : ""}`;
@@ -812,12 +838,16 @@ export const deleteGoal = async (req, res) => {
 			message: "Goal deleted successfully",
 			refundAmount: refundAmount || 0,
 			penaltyApplied: penaltyApplied || 0,
-			lockType: goal.lockType,
-			wasLocked: goal.commitmentSettings?.enabled || false,
+			lockType: effectiveLockType,
+			wasLocked: isLocked,
+			wasCommitted: goal.commitmentSettings?.enabled || false,
 		});
 	} catch (err) {
 		console.error("❌ Delete goal error:", err);
-		res.status(500).json({ error: err.message });
+		res.status(500).json({
+			error: err.message,
+			message: "Failed to delete goal. Please try again.",
+		});
 	}
 };
 
