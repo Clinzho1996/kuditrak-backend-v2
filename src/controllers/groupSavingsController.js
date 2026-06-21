@@ -237,6 +237,8 @@ const processPayout = async (groupId) => {
 
 // ==================== GROUP MANAGEMENT ====================
 
+// controllers/groupSavingsController.js - Fix createGroup response
+
 export const createGroup = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -254,12 +256,16 @@ export const createGroup = async (req, res) => {
 			color = "#4F46E5",
 		} = req.body;
 
+		console.log("📤 Creating group:", { name, contributionAmount, userId });
+
+		// Validate
 		if (!name || !contributionAmount || contributionAmount <= 0) {
 			return res.status(400).json({
 				error: "Group name and contribution amount are required",
 			});
 		}
 
+		// Check if user already has a group with same name
 		const existing = await GroupSavings.findOne({
 			createdBy: userId,
 			name: { $regex: new RegExp(`^${name}$`, "i") },
@@ -272,15 +278,21 @@ export const createGroup = async (req, res) => {
 			});
 		}
 
+		// ✅ Check if user has a wallet
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
 		});
 
 		if (!wallet) {
-			return res.status(404).json({ error: "Wallet not found" });
+			return res.status(404).json({
+				error: "Wallet not found. Please create a wallet first.",
+			});
 		}
 
+		console.log("✅ Wallet found:", wallet._id);
+
+		// Generate unique group code
 		let groupCode = generateGroupCode();
 		let exists = await GroupSavings.findOne({ groupCode });
 		while (exists) {
@@ -288,6 +300,7 @@ export const createGroup = async (req, res) => {
 			exists = await GroupSavings.findOne({ groupCode });
 		}
 
+		// Create group
 		const group = new GroupSavings({
 			name,
 			description,
@@ -305,12 +318,22 @@ export const createGroup = async (req, res) => {
 			status: "active",
 			currentCycle: 1,
 			totalContributions: 0,
+			memberCount: 1,
 		});
 
 		await group.save();
+		console.log("✅ Group saved:", group._id);
 
-		const subAccount = await getOrCreateGroupSubAccount(userId, group);
+		// Create group sub-account
+		let subAccount;
+		try {
+			subAccount = await getOrCreateGroupSubAccount(userId, group);
+			console.log("✅ Sub-account created:", subAccount.subAccountId);
+		} catch (subError) {
+			console.error("❌ Sub-account error:", subError);
+		}
 
+		// Add creator as first member
 		const member = new GroupMember({
 			groupId: group._id,
 			userId: userId,
@@ -326,7 +349,9 @@ export const createGroup = async (req, res) => {
 		});
 
 		await member.save();
+		console.log("✅ Member added:", member._id);
 
+		// Send notification
 		await sendPushToUser(
 			userId,
 			"👥 Group Savings Created!",
@@ -338,22 +363,36 @@ export const createGroup = async (req, res) => {
 			},
 		);
 
+		// ✅ Return the complete group data
+		const groupData = {
+			...group.toObject(),
+			role: "admin",
+			joinedAt: member.joinedAt,
+			totalContributed: 0,
+			cycleStatus: member.cycleStatus,
+		};
+
 		res.status(201).json({
 			success: true,
 			message: "Group created successfully",
 			data: {
-				group,
+				group: groupData,
 				member,
-				subAccount: {
-					balance: subAccount.balance,
-					subAccountId: subAccount.subAccountId,
-				},
+				subAccount: subAccount
+					? {
+							balance: subAccount.balance,
+							subAccountId: subAccount.subAccountId,
+						}
+					: null,
 				groupCode,
 			},
 		});
 	} catch (err) {
-		console.error("Create group error:", err);
-		res.status(500).json({ error: err.message });
+		console.error("❌ Create group error:", err);
+		res.status(500).json({
+			error: err.message,
+			details: err.stack,
+		});
 	}
 };
 
@@ -421,37 +460,43 @@ export const getUserGroups = async (req, res) => {
 	try {
 		const userId = req.user._id;
 
+		// ✅ Find all group memberships for the user
 		const groupMemberships = await GroupMember.find({
 			userId,
 			status: "active",
-		}).populate("groupId");
+		});
 
-		const groups = groupMemberships
-			.filter((gm) => gm.groupId)
-			.map((gm) => ({
-				...gm.groupId.toObject(),
-				role: gm.role,
-				joinedAt: gm.joinedAt,
-				totalContributed: gm.totalContributed,
-				cycleStatus: gm.cycleStatus,
-			}));
+		// ✅ Get the actual group data for each membership
+		const groupIds = groupMemberships.map((gm) => gm.groupId);
 
-		const groupsWithBalances = await Promise.all(
-			groups.map(async (group) => {
-				const subAccount = await AnchorSubAccount.findOne({
-					userId: group.createdBy,
-					subAccountId: group.subAccountId,
-				});
-				return {
-					...group,
-					balance: subAccount?.balance || 0,
-				};
-			}),
-		);
+		const groups = await GroupSavings.find({
+			_id: { $in: groupIds },
+			status: "active",
+		}).lean();
+
+		console.log(`📊 Found ${groups.length} groups for user ${userId}`);
+
+		// ✅ Add membership info to each group
+		const groupsWithMembership = groups.map((group) => {
+			const membership = groupMemberships.find(
+				(gm) => gm.groupId.toString() === group._id.toString(),
+			);
+			return {
+				...group,
+				role: membership?.role || "member",
+				joinedAt: membership?.joinedAt,
+				totalContributed: membership?.totalContributed || 0,
+				cycleStatus: membership?.cycleStatus || {
+					cycle: group.currentCycle,
+					paid: false,
+					amountDue: group.contributionAmount,
+				},
+			};
+		});
 
 		res.status(200).json({
 			success: true,
-			data: groupsWithBalances,
+			data: groupsWithMembership,
 		});
 	} catch (err) {
 		console.error("Get user groups error:", err);
