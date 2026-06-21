@@ -328,6 +328,11 @@ export const createGoal = async (req, res) => {
 /**
  * Update goal
  */
+// controllers/userGoalController.js - Fixed updateGoal
+
+/**
+ * Update goal
+ */
 export const updateGoal = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -339,6 +344,10 @@ export const updateGoal = async (req, res) => {
 			autoAllocateEnabled,
 			icon,
 			color,
+			lockType, // ✅ Added
+			releaseDate, // ✅ Added
+			autoSaveEnabled, // ✅ Added
+			autoSaveAmount, // ✅ Added
 		} = req.body;
 
 		const goal = await UserGoal.findOne({ _id: id, userId: req.user._id });
@@ -347,29 +356,82 @@ export const updateGoal = async (req, res) => {
 			return res.status(404).json({ error: "Goal not found" });
 		}
 
+		// Update basic fields
 		if (name) goal.name = name;
 		if (goalAmount) goal.goalAmount = goalAmount;
 		if (icon) goal.icon = icon;
 		if (color) goal.color = color;
 
+		// ✅ Handle Lock Type / Commitment Settings
+		if (lockType !== undefined) {
+			const isLocked = lockType === "Soft Lock" || lockType === "Hard Lock";
+
+			if (isLocked && releaseDate) {
+				// Enable commitment with release date
+				goal.commitmentSettings = {
+					enabled: true,
+					releaseDate: new Date(releaseDate),
+					committedAt: goal.commitmentSettings?.committedAt || new Date(),
+					originalGoalAmount:
+						goal.commitmentSettings?.originalGoalAmount || goal.goalAmount,
+				};
+			} else {
+				// Disable commitment (Flexible)
+				goal.commitmentSettings = {
+					enabled: false,
+					releaseDate: null,
+					committedAt: null,
+					originalGoalAmount: null,
+				};
+			}
+		} else if (releaseDate !== undefined) {
+			// If only releaseDate is provided (without lockType)
+			if (releaseDate) {
+				goal.commitmentSettings = {
+					...goal.commitmentSettings,
+					enabled: true,
+					releaseDate: new Date(releaseDate),
+					committedAt: goal.commitmentSettings?.committedAt || new Date(),
+				};
+			} else {
+				goal.commitmentSettings = {
+					...goal.commitmentSettings,
+					enabled: false,
+					releaseDate: null,
+				};
+			}
+		}
+
+		// ✅ Handle Auto-Save Settings
 		if (
 			frequency !== undefined ||
 			autoAllocateAmount !== undefined ||
-			autoAllocateEnabled !== undefined
+			autoAllocateEnabled !== undefined ||
+			autoSaveEnabled !== undefined ||
+			autoSaveAmount !== undefined
 		) {
+			// Support both old and new field names
+			const newFrequency =
+				frequency !== undefined
+					? frequency
+					: goal.allocationSchedule?.frequency;
+			const newAmount =
+				autoAllocateAmount !== undefined
+					? autoAllocateAmount
+					: autoSaveAmount !== undefined
+						? autoSaveAmount
+						: goal.allocationSchedule?.amount;
+			const newAutoAllocateEnabled =
+				autoAllocateEnabled !== undefined
+					? autoAllocateEnabled
+					: autoSaveEnabled !== undefined
+						? autoSaveEnabled
+						: goal.allocationSchedule?.autoAllocateEnabled;
+
 			goal.allocationSchedule = {
-				frequency:
-					frequency !== undefined
-						? frequency
-						: goal.allocationSchedule.frequency,
-				amount:
-					autoAllocateAmount !== undefined
-						? autoAllocateAmount
-						: goal.allocationSchedule.amount,
-				autoAllocateEnabled:
-					autoAllocateEnabled !== undefined
-						? autoAllocateEnabled
-						: goal.allocationSchedule.autoAllocateEnabled,
+				frequency: newFrequency || "none",
+				amount: newAmount || 0,
+				autoAllocateEnabled: newAutoAllocateEnabled || false,
 			};
 
 			// Update sub-account auto-save settings
@@ -390,6 +452,7 @@ export const updateGoal = async (req, res) => {
 				}
 			}
 
+			// Schedule or unschedule auto-allocation
 			if (
 				goal.allocationSchedule.autoAllocateEnabled &&
 				goal.allocationSchedule.frequency !== "none" &&
@@ -412,9 +475,22 @@ export const updateGoal = async (req, res) => {
 		goal.updatedAt = new Date();
 		await goal.save();
 
+		// ✅ Fetch updated sub-account data
+		let subAccount = null;
+		if (goal.subAccountId) {
+			subAccount = await AnchorSubAccount.findOne({
+				userId: req.user._id,
+				subAccountId: goal.subAccountId,
+			});
+		}
+
 		res.json({
 			success: true,
-			data: goal,
+			data: {
+				...goal.toObject(),
+				subAccountBalance: subAccount?.balance || 0,
+				isLocked: subAccount?.isLocked || false,
+			},
 			message: "Goal updated successfully",
 		});
 	} catch (err) {
