@@ -899,15 +899,20 @@ export const removeMember = async (req, res) => {
 
 // ==================== CONTRIBUTIONS ====================
 
+// controllers/groupSavingsController.js - Fix contributeToGroup
+
 export const contributeToGroup = async (req, res) => {
 	try {
 		const userId = req.user._id;
 		const { groupId, amount } = req.body;
 
+		console.log("💰 Contribute to group:", { userId, groupId, amount });
+
 		if (!amount || amount <= 0) {
 			return res.status(400).json({ error: "Valid amount required" });
 		}
 
+		// Find group
 		const group = await GroupSavings.findOne({
 			_id: groupId,
 			status: "active",
@@ -917,6 +922,9 @@ export const contributeToGroup = async (req, res) => {
 			return res.status(404).json({ error: "Group not found" });
 		}
 
+		console.log("📊 Group found:", group.name);
+
+		// Check if user is a member
 		const member = await GroupMember.findOne({
 			groupId: group._id,
 			userId,
@@ -929,6 +937,9 @@ export const contributeToGroup = async (req, res) => {
 				.json({ error: "You are not a member of this group" });
 		}
 
+		console.log("👤 Member found:", member._id);
+
+		// Get user's wallet
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -938,6 +949,8 @@ export const contributeToGroup = async (req, res) => {
 			return res.status(404).json({ error: "Wallet not found" });
 		}
 
+		console.log("💳 Wallet balance:", wallet.balance);
+
 		if (wallet.balance < amount) {
 			return res.status(400).json({
 				error: "Insufficient balance",
@@ -946,14 +959,66 @@ export const contributeToGroup = async (req, res) => {
 			});
 		}
 
-		const subAccount = await getOrCreateGroupSubAccount(userId, group);
+		// ✅ Get or create group sub-account (ONLY AnchorSubAccount, NOT UserGoal)
+		let subAccount = await AnchorSubAccount.findOne({
+			userId: group.createdBy,
+			subAccountId: group.subAccountId,
+		});
 
+		if (!subAccount) {
+			console.log("🔄 Creating group sub-account...");
+			// ✅ Create ONLY AnchorSubAccount, NOT UserGoal
+			subAccount = await AnchorSubAccount.create({
+				userId: group.createdBy,
+				parentWalletId: wallet._id,
+				subAccountId: `group_${group._id}_${Date.now().toString().slice(-6)}`,
+				name: group.name,
+				type: "savings",
+				balance: 0,
+				targetAmount: null,
+				autoSave: {
+					enabled: false,
+					amount: 0,
+					frequency: "monthly",
+					dayOfMonth: 1,
+				},
+				lockSettings: {
+					enabled: false,
+					unlockDate: null,
+					lockedAt: null,
+				},
+				icon: group.icon || "👥",
+				color: group.color || "#4F46E5",
+				metadata: {
+					groupId: group._id,
+					type: "group_savings",
+					memberCount: group.memberCount || 0,
+				},
+			});
+
+			// ✅ Update group with subAccountId
+			group.subAccountId = subAccount.subAccountId;
+			await group.save();
+			console.log("✅ Group sub-account created:", subAccount.subAccountId);
+		}
+
+		console.log("📊 Sub-account balance before:", subAccount.balance);
+
+		// Transfer from wallet to group sub-account
 		wallet.balance -= amount;
 		subAccount.balance += amount;
 		wallet.available = wallet.balance - (wallet.allocated || 0);
 		await wallet.save();
 		await subAccount.save();
 
+		console.log(
+			"✅ Transfer complete - Wallet:",
+			wallet.balance,
+			"Sub-account:",
+			subAccount.balance,
+		);
+
+		// Update member contribution
 		member.totalContributed += amount;
 		member.cycleStatus = {
 			cycle: group.currentCycle,
@@ -964,6 +1029,7 @@ export const contributeToGroup = async (req, res) => {
 		};
 		await member.save();
 
+		// ✅ Create contribution record (GroupContribution, NOT UserGoal)
 		const contribution = new GroupContribution({
 			groupId: group._id,
 			memberId: userId,
@@ -979,10 +1045,13 @@ export const contributeToGroup = async (req, res) => {
 		});
 
 		await contribution.save();
+		console.log("✅ Contribution record created:", contribution._id);
 
+		// Update group total
 		group.totalContributions += amount;
 		await group.save();
 
+		// ✅ Create AnchorTransaction (NOT UserGoal)
 		await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: wallet.anchorCustomerId,
@@ -1004,6 +1073,7 @@ export const contributeToGroup = async (req, res) => {
 			},
 		});
 
+		// Check if all members have paid for this cycle
 		const members = await GroupMember.find({
 			groupId: group._id,
 			status: "active",
@@ -1011,10 +1081,12 @@ export const contributeToGroup = async (req, res) => {
 
 		const allPaid = members.every((m) => m.cycleStatus?.paid === true);
 
-		if (allPaid) {
+		if (allPaid && members.length > 0) {
+			console.log("🎉 All members paid! Processing payout...");
 			await processPayout(group._id);
 		}
 
+		// Send notification
 		await sendPushToUser(
 			userId,
 			"💰 Contribution Successful!",
@@ -1039,8 +1111,11 @@ export const contributeToGroup = async (req, res) => {
 			},
 		});
 	} catch (err) {
-		console.error("Contribute to group error:", err);
-		res.status(500).json({ error: err.message });
+		console.error("❌ Contribute to group error:", err);
+		res.status(500).json({
+			error: err.message,
+			details: err.stack,
+		});
 	}
 };
 
