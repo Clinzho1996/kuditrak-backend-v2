@@ -325,14 +325,8 @@ export const createGoal = async (req, res) => {
 	}
 };
 
-/**
- * Update goal
- */
 // controllers/userGoalController.js - Fixed updateGoal
 
-/**
- * Update goal
- */
 export const updateGoal = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -344,10 +338,10 @@ export const updateGoal = async (req, res) => {
 			autoAllocateEnabled,
 			icon,
 			color,
-			lockType, // ✅ Added
-			releaseDate, // ✅ Added
-			autoSaveEnabled, // ✅ Added
-			autoSaveAmount, // ✅ Added
+			lockType,
+			releaseDate,
+			autoSaveEnabled,
+			autoSaveAmount,
 		} = req.body;
 
 		const goal = await UserGoal.findOne({ _id: id, userId: req.user._id });
@@ -362,12 +356,12 @@ export const updateGoal = async (req, res) => {
 		if (icon) goal.icon = icon;
 		if (color) goal.color = color;
 
-		// ✅ Handle Lock Type / Commitment Settings
+		// ✅ FIX: Handle Lock Type - ALWAYS update based on lockType
 		if (lockType !== undefined) {
 			const isLocked = lockType === "Soft Lock" || lockType === "Hard Lock";
 
 			if (isLocked && releaseDate) {
-				// Enable commitment with release date
+				// ✅ Force enable commitment when lock is selected
 				goal.commitmentSettings = {
 					enabled: true,
 					releaseDate: new Date(releaseDate),
@@ -375,6 +369,7 @@ export const updateGoal = async (req, res) => {
 					originalGoalAmount:
 						goal.commitmentSettings?.originalGoalAmount || goal.goalAmount,
 				};
+				console.log(`🔒 Goal ${goal._id} locked until ${releaseDate}`);
 			} else {
 				// Disable commitment (Flexible)
 				goal.commitmentSettings = {
@@ -383,10 +378,12 @@ export const updateGoal = async (req, res) => {
 					committedAt: null,
 					originalGoalAmount: null,
 				};
+				console.log(`🔓 Goal ${goal._id} is now flexible`);
 			}
 		} else if (releaseDate !== undefined) {
 			// If only releaseDate is provided (without lockType)
 			if (releaseDate) {
+				// ✅ Auto-enable if a date is provided
 				goal.commitmentSettings = {
 					...goal.commitmentSettings,
 					enabled: true,
@@ -402,7 +399,7 @@ export const updateGoal = async (req, res) => {
 			}
 		}
 
-		// ✅ Handle Auto-Save Settings
+		// Handle Auto-Save Settings
 		if (
 			frequency !== undefined ||
 			autoAllocateAmount !== undefined ||
@@ -410,7 +407,6 @@ export const updateGoal = async (req, res) => {
 			autoSaveEnabled !== undefined ||
 			autoSaveAmount !== undefined
 		) {
-			// Support both old and new field names
 			const newFrequency =
 				frequency !== undefined
 					? frequency
@@ -434,7 +430,7 @@ export const updateGoal = async (req, res) => {
 				autoAllocateEnabled: newAutoAllocateEnabled || false,
 			};
 
-			// Update sub-account auto-save settings
+			// Update sub-account
 			if (goal.subAccountId) {
 				const subAccount = await AnchorSubAccount.findOne({
 					userId: req.user._id,
@@ -452,7 +448,6 @@ export const updateGoal = async (req, res) => {
 				}
 			}
 
-			// Schedule or unschedule auto-allocation
 			if (
 				goal.allocationSchedule.autoAllocateEnabled &&
 				goal.allocationSchedule.frequency !== "none" &&
@@ -475,7 +470,7 @@ export const updateGoal = async (req, res) => {
 		goal.updatedAt = new Date();
 		await goal.save();
 
-		// ✅ Fetch updated sub-account data
+		// Fetch updated sub-account
 		let subAccount = null;
 		if (goal.subAccountId) {
 			subAccount = await AnchorSubAccount.findOne({
@@ -483,6 +478,12 @@ export const updateGoal = async (req, res) => {
 				subAccountId: goal.subAccountId,
 			});
 		}
+
+		console.log(`✅ Goal ${goal._id} updated:`, {
+			name: goal.name,
+			lockEnabled: goal.commitmentSettings?.enabled,
+			releaseDate: goal.commitmentSettings?.releaseDate,
+		});
 
 		res.json({
 			success: true,
@@ -498,7 +499,6 @@ export const updateGoal = async (req, res) => {
 		res.status(500).json({ error: err.message });
 	}
 };
-
 /**
  * Delete goal
  */
