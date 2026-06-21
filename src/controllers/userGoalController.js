@@ -561,6 +561,8 @@ export const updateGoal = async (req, res) => {
 
 // controllers/userGoalController.js - Fixed deleteGoal
 
+// controllers/userGoalController.js - Fixed deleteGoal with Soft Lock penalty
+
 export const deleteGoal = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -622,7 +624,6 @@ export const deleteGoal = async (req, res) => {
 		});
 
 		// ✅ The total funds to refund is the goal's allocatedAmount
-		// plus any funds in the sub-account
 		const totalAllocatedFunds = subAccountBalance + (goal.allocatedAmount || 0);
 
 		console.log(
@@ -665,13 +666,70 @@ export const deleteGoal = async (req, res) => {
 					refundAmount = totalAllocatedFunds - penaltyApplied;
 					refundMessage = `7% penalty (₦${penaltyApplied.toLocaleString()}) applied for early withdrawal.`;
 					console.log(`⚠️ Soft lock penalty: ₦${penaltyApplied}`);
+
+					// ✅ CRITICAL: Collect the penalty
+					const platformWalletId = process.env.SYSTEM_BUCKET_ID;
+					if (platformWalletId) {
+						let platformWallet = await AnchorWallet.findOne({
+							userId: platformWalletId,
+							walletType: "main",
+						});
+
+						if (!platformWallet) {
+							platformWallet = await AnchorWallet.create({
+								userId: platformWalletId,
+								anchorCustomerId: `platform_${Date.now()}`,
+								walletId: `platform_wallet_${Date.now()}`,
+								walletType: "main",
+								balance: 0,
+								name: "Platform Wallet",
+								currency: "NGN",
+								status: "active",
+								isLocal: true,
+							});
+							console.log("✅ Platform wallet created:", platformWallet._id);
+						}
+
+						// ✅ Transfer penalty to platform wallet
+						platformWallet.balance += penaltyApplied;
+						platformWallet.available =
+							platformWallet.balance - (platformWallet.allocated || 0);
+						await platformWallet.save();
+
+						// ✅ Create penalty transaction
+						await AnchorTransaction.create({
+							userId: req.user._id,
+							anchorCustomerId: wallet.anchorCustomerId,
+							walletId: platformWallet._id,
+							amount: penaltyApplied,
+							currency: "NGN",
+							type: "credit",
+							category: "penalty",
+							status: "success",
+							description: `Early withdrawal penalty from goal: ${goal.name}`,
+							source: "sub_account",
+							destination: "platform_wallet",
+							metadata: {
+								goalId: goal._id,
+								goalName: goal.name,
+								penaltyAmount: penaltyApplied,
+								originalAmount: totalAllocatedFunds,
+								refundAmount: refundAmount,
+								lockType: goal.lockType,
+							},
+						});
+
+						console.log(
+							`✅ Penalty ₦${penaltyApplied} collected to platform wallet`,
+						);
+					}
 				}
 			}
 
-			// ✅ CRITICAL FIX: Directly add refund to wallet balance
+			// ✅ Refund to main wallet (only the refund amount, not including penalty)
 			wallet.balance += refundAmount;
 
-			// ✅ Reduce allocated amount (if the field exists)
+			// ✅ Reduce allocated by the total amount (including penalty)
 			if (wallet.allocated !== undefined) {
 				wallet.allocated = Math.max(
 					0,
@@ -689,6 +747,7 @@ export const deleteGoal = async (req, res) => {
 				allocated: wallet.allocated || 0,
 				available: wallet.available || 0,
 				refundAmount: refundAmount,
+				penaltyApplied: penaltyApplied,
 			});
 
 			// ✅ Create refund transaction
@@ -701,7 +760,7 @@ export const deleteGoal = async (req, res) => {
 				type: "credit",
 				category: "refund",
 				status: "success",
-				description: `Refund from deleted goal: ${goal.name}${penaltyApplied > 0 ? ` (${penaltyApplied} penalty applied)` : ""}`,
+				description: `Refund from deleted goal: ${goal.name}${penaltyApplied > 0 ? ` (₦${penaltyApplied.toLocaleString()} penalty applied)` : ""}`,
 				source: "sub_account",
 				destination: "wallet",
 				metadata: {
