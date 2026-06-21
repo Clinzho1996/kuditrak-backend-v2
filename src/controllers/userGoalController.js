@@ -579,7 +579,7 @@ export const deleteGoal = async (req, res) => {
 			return res.status(404).json({ error: "Goal not found" });
 		}
 
-		// ✅ Initialize variables outside the block
+		// ✅ Initialize variables
 		let subAccount = null;
 		let subAccountBalance = 0;
 		let refundAmount = 0;
@@ -595,108 +595,123 @@ export const deleteGoal = async (req, res) => {
 
 			if (subAccount) {
 				subAccountBalance = subAccount.balance || 0;
+				console.log(`💰 Sub-account balance: ₦${subAccountBalance}`);
 			}
 		}
 
-		// ✅ If there are funds in the sub-account, refund to main wallet
-		if (subAccountBalance > 0) {
-			const wallet = await AnchorWallet.findOne({
-				userId: req.user._id,
-				walletType: "main",
+		// ✅ Get main wallet
+		const wallet = await AnchorWallet.findOne({
+			userId: req.user._id,
+			walletType: "main",
+		});
+
+		if (!wallet) {
+			return res.status(404).json({ error: "Wallet not found" });
+		}
+
+		console.log("📊 Wallet before deletion:", {
+			balance: wallet.balance,
+			allocated: wallet.allocated || 0,
+			available: wallet.available || 0,
+		});
+
+		// ✅ CRITICAL FIX: Check BOTH sub-account balance AND goal.allocatedAmount
+		// The funds might be in the wallet's "allocated" field, not in the sub-account
+		const totalAllocatedFunds = subAccountBalance + (goal.allocatedAmount || 0);
+
+		console.log(
+			`💰 Total funds to refund: ₦${totalAllocatedFunds} (subAccount: ₦${subAccountBalance}, goal.allocatedAmount: ₦${goal.allocatedAmount})`,
+		);
+
+		if (totalAllocatedFunds > 0) {
+			refundAmount = totalAllocatedFunds;
+
+			// ✅ Check lock type
+			const isHardLock = goal.lockType === "Hard Lock";
+			const isSoftLock = goal.lockType === "Soft Lock";
+
+			// ✅ For Hard Lock: Check if target date has passed
+			if (isHardLock && goal.commitmentSettings?.releaseDate) {
+				const now = new Date();
+				const releaseDate = new Date(goal.commitmentSettings.releaseDate);
+
+				if (now < releaseDate) {
+					return res.status(400).json({
+						error: "Cannot delete this goal",
+						message: `This goal has a Hard Lock and cannot be deleted until ${releaseDate.toLocaleDateString()}.`,
+						lockType: "Hard Lock",
+						releaseDate: releaseDate.toISOString(),
+						remainingDays: Math.ceil(
+							(releaseDate - now) / (1000 * 60 * 60 * 24),
+						),
+					});
+				}
+			}
+
+			// ✅ For Soft Lock: Apply 7% penalty on refund
+			if (isSoftLock && goal.commitmentSettings?.releaseDate) {
+				const now = new Date();
+				const releaseDate = new Date(goal.commitmentSettings.releaseDate);
+
+				if (now < releaseDate) {
+					const penaltyRate = 0.07;
+					penaltyApplied = Math.round(totalAllocatedFunds * penaltyRate);
+					refundAmount = totalAllocatedFunds - penaltyApplied;
+					refundMessage = `7% penalty (₦${penaltyApplied.toLocaleString()}) applied for early withdrawal.`;
+					console.log(`⚠️ Soft lock penalty: ₦${penaltyApplied}`);
+				}
+			}
+
+			// ✅ Refund to main wallet
+			wallet.balance += refundAmount;
+
+			// ✅ Reduce allocated by the total amount (not just refundAmount)
+			wallet.allocated = Math.max(
+				0,
+				(wallet.allocated || 0) - totalAllocatedFunds,
+			);
+			wallet.available = wallet.balance - wallet.allocated;
+			await wallet.save();
+
+			console.log("📊 Wallet after refund:", {
+				balance: wallet.balance,
+				allocated: wallet.allocated || 0,
+				available: wallet.available || 0,
+				refundAmount: refundAmount,
 			});
 
-			if (wallet) {
-				refundAmount = subAccountBalance;
+			// ✅ Create refund transaction
+			await AnchorTransaction.create({
+				userId: req.user._id,
+				anchorCustomerId: wallet.anchorCustomerId,
+				walletId: wallet._id,
+				amount: refundAmount,
+				currency: "NGN",
+				type: "credit",
+				category: "refund",
+				status: "success",
+				description: `Refund from deleted goal: ${goal.name}${penaltyApplied > 0 ? ` (${penaltyApplied} penalty applied)` : ""}`,
+				source: "sub_account",
+				destination: "wallet",
+				metadata: {
+					goalId: goal._id,
+					goalName: goal.name,
+					originalAmount: totalAllocatedFunds,
+					penaltyApplied: penaltyApplied,
+					refundAmount: refundAmount,
+					lockType: goal.lockType,
+					deletedAt: new Date().toISOString(),
+				},
+			});
 
-				// ✅ Check if goal is locked (Soft Lock or Hard Lock)
-				const isLocked = goal.commitmentSettings?.enabled || false;
-				const isHardLock = goal.lockType === "Hard Lock";
-				const isSoftLock = goal.lockType === "Soft Lock";
-
-				// ✅ For Hard Lock: Check if target date has passed
-				if (isHardLock && goal.commitmentSettings?.releaseDate) {
-					const now = new Date();
-					const releaseDate = new Date(goal.commitmentSettings.releaseDate);
-
-					if (now < releaseDate) {
-						// Hard Lock - Cannot withdraw before release date
-						return res.status(400).json({
-							error: "Cannot delete this goal",
-							message: `This goal has a Hard Lock and cannot be deleted until ${releaseDate.toLocaleDateString()}. You must wait for the lock to expire or contact support.`,
-							lockType: "Hard Lock",
-							releaseDate: releaseDate.toISOString(),
-							remainingDays: Math.ceil(
-								(releaseDate - now) / (1000 * 60 * 60 * 24),
-							),
-							actionRequired: "Wait for lock to expire",
-						});
-					}
-				}
-
-				// ✅ For Soft Lock: Apply 7% penalty on refund
-				if (isSoftLock && goal.commitmentSettings?.releaseDate) {
-					const now = new Date();
-					const releaseDate = new Date(goal.commitmentSettings.releaseDate);
-
-					if (now < releaseDate) {
-						// Early withdrawal - apply penalty
-						const penaltyRate = 0.07;
-						penaltyApplied = Math.round(subAccountBalance * penaltyRate);
-						refundAmount = subAccountBalance - penaltyApplied;
-
-						// Create penalty transaction
-						const platformWallet = await AnchorWallet.findOne({
-							userId: process.env.SYSTEM_BUCKET_ID,
-						});
-						if (platformWallet) {
-							platformWallet.balance += penaltyApplied;
-							platformWallet.available =
-								platformWallet.balance - (platformWallet.allocated || 0);
-							await platformWallet.save();
-						}
-
-						refundMessage = `7% penalty (₦${penaltyApplied.toLocaleString()}) applied for early withdrawal.`;
-					}
-				}
-
-				// ✅ Refund to main wallet
-				wallet.balance += refundAmount;
-				wallet.allocated = Math.max(
-					0,
-					(wallet.allocated || 0) - subAccountBalance,
-				);
-				wallet.available = wallet.balance - wallet.allocated;
-				await wallet.save();
-
-				// ✅ Create refund transaction record
-				await AnchorTransaction.create({
-					userId: req.user._id,
-					anchorCustomerId: wallet.anchorCustomerId,
-					walletId: wallet._id,
-					amount: refundAmount,
-					currency: "NGN",
-					type: "credit",
-					category: "refund",
-					status: "success",
-					description: `Refund from deleted goal: ${goal.name}${penaltyApplied > 0 ? ` (${penaltyApplied} penalty applied)` : ""}`,
-					source: "sub_account",
-					destination: "wallet",
-					metadata: {
-						goalId: goal._id,
-						goalName: goal.name,
-						originalAmount: subAccountBalance,
-						penaltyApplied: penaltyApplied,
-						refundAmount: refundAmount,
-						lockType: goal.lockType,
-						deletedAt: new Date().toISOString(),
-					},
-				});
-
-				console.log(
-					`✅ Refunded ₦${refundAmount} to wallet for deleted goal ${goal.name}`,
-				);
-			}
+			console.log(`✅ Refund transaction created for ₦${refundAmount}`);
+		} else {
+			console.log("ℹ️ No funds to refund");
 		}
+
+		// ✅ Reset goal's allocatedAmount to 0 (in case it wasn't in sub-account)
+		goal.allocatedAmount = 0;
+		await goal.save();
 
 		// ✅ Delete sub-account if exists
 		if (goal.subAccountId) {
@@ -709,9 +724,9 @@ export const deleteGoal = async (req, res) => {
 		// ✅ Delete the goal
 		await goal.deleteOne();
 
-		// ✅ Send notification with refund details
+		// ✅ Send notification
 		let notificationBody = `Your goal "${goal.name}" has been deleted.`;
-		if (subAccountBalance > 0) {
+		if (refundAmount > 0) {
 			notificationBody += ` ₦${Math.floor(refundAmount).toLocaleString()} has been refunded to your wallet.${penaltyApplied > 0 ? ` (₦${penaltyApplied.toLocaleString()} penalty applied)` : ""}`;
 		}
 
