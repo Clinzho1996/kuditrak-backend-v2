@@ -7,6 +7,7 @@ import AnchorWallet from "../models/AnchorWallet.js";
 import UserGoal from "../models/UserGoal.js";
 import Wallet from "../models/Wallet.js";
 import { getOrCreateAnchorCustomer } from "../services/anchorCustomerService.js";
+import { sendGoalNotification } from "../services/notificationService.js";
 import { sendPushToUser } from "../services/pushService.js";
 
 // Store scheduled jobs
