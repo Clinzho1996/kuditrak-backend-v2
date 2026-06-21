@@ -18,27 +18,43 @@ const scheduledJobs = new Map();
 /**
  * Get or create user's main wallet
  */
+// controllers/userGoalController.js - getMainWallet
+
 const getMainWallet = async (userId) => {
-	let wallet = await AnchorWallet.findOne({ userId, walletType: "main" });
-	if (!wallet) {
-		const customerResult = await getOrCreateAnchorCustomer(userId);
-		if (!customerResult.success) {
-			throw new Error("Failed to get/create Anchor customer");
+	try {
+		let wallet = await AnchorWallet.findOne({ userId, walletType: "main" });
+
+		if (!wallet) {
+			console.log("🔄 No wallet found, creating one for user:", userId);
+
+			// Try to get Anchor customer
+			const customerResult = await getOrCreateAnchorCustomer(userId);
+			if (!customerResult.success) {
+				throw new Error(
+					"Failed to get/create Anchor customer: " + customerResult.error,
+				);
+			}
+
+			wallet = await AnchorWallet.create({
+				userId,
+				anchorCustomerId: customerResult.customerId,
+				walletId: `wallet_${Date.now()}_${userId.toString().slice(-6)}`,
+				walletType: "main",
+				balance: 0,
+				name: "Main Wallet",
+				currency: "NGN",
+				status: "active",
+				isLocal: true,
+			});
+
+			console.log("✅ Wallet created:", wallet._id);
 		}
 
-		wallet = await AnchorWallet.create({
-			userId,
-			anchorCustomerId: customerResult.customerId,
-			walletId: `wallet_${Date.now()}_${userId.toString().slice(-6)}`,
-			walletType: "main",
-			balance: 0,
-			name: "Main Wallet",
-			currency: "NGN",
-			status: "active",
-			isLocal: true,
-		});
+		return wallet;
+	} catch (error) {
+		console.error("❌ getMainWallet error:", error);
+		throw error;
 	}
-	return wallet;
 };
 
 /**
@@ -253,10 +269,7 @@ export const getGoalById = async (req, res) => {
 	}
 };
 
-/**
- * Create a new goal with Anchor sub-account
- */
-// controllers/userGoalController.js - Fix createGoal
+// controllers/userGoalController.js - Fixed createGoal
 
 export const createGoal = async (req, res) => {
 	try {
@@ -270,21 +283,51 @@ export const createGoal = async (req, res) => {
 			releaseDate,
 			icon = "💰",
 			color = "#4F46E5",
-			lockType, // ✅ Add this
+			lockType = "Flexible",
 		} = req.body;
 
-		const wallet = await getMainWallet(req.user._id);
+		console.log("📥 Create goal request body:", req.body);
+		console.log("👤 User ID:", req.user._id);
 
-		// ✅ Store lockType in metadata or as a top-level field
-		const goal = new UserGoal({
+		// ✅ Validate required fields
+		if (!name) {
+			return res.status(400).json({ error: "Name is required" });
+		}
+
+		if (!goalAmount || goalAmount <= 0) {
+			return res.status(400).json({ error: "Valid goal amount is required" });
+		}
+
+		// ✅ Get main wallet - with better error handling
+		let wallet;
+		try {
+			wallet = await getMainWallet(req.user._id);
+		} catch (walletError) {
+			console.error("❌ Wallet error:", walletError);
+			return res.status(500).json({
+				error: "Failed to get or create wallet",
+				details: walletError.message,
+			});
+		}
+
+		if (!wallet) {
+			return res
+				.status(500)
+				.json({ error: "Wallet not found or could not be created" });
+		}
+
+		console.log("✅ Wallet found:", wallet._id);
+
+		// ✅ Create goal with all required fields
+		const goalData = {
 			userId: req.user._id,
 			walletId: wallet._id,
-			name,
-			goalAmount,
+			name: name,
+			goalAmount: goalAmount,
 			allocatedAmount: 0,
-			icon,
-			color,
-			lockType: lockType || (commitmentEnabled ? "Soft Lock" : "Flexible"), // ✅ Store lockType
+			icon: icon,
+			color: color,
+			lockType: lockType,
 			allocationSchedule: {
 				frequency: frequency || "monthly",
 				amount: autoAllocateAmount || 0,
@@ -296,12 +339,23 @@ export const createGoal = async (req, res) => {
 				committedAt: commitmentEnabled ? new Date() : null,
 				originalGoalAmount: commitmentEnabled ? goalAmount : null,
 			},
-		});
+		};
 
+		console.log("📝 Creating goal with data:", goalData);
+
+		const goal = new UserGoal(goalData);
 		await goal.save();
 
+		console.log("✅ Goal saved:", goal._id);
+
 		// Create sub-account for the goal
-		const subAccount = await getOrCreateGoalSubAccount(req.user._id, goal);
+		let subAccount;
+		try {
+			subAccount = await getOrCreateGoalSubAccount(req.user._id, goal);
+		} catch (subError) {
+			console.error("❌ Sub-account error:", subError);
+			// Continue even if sub-account fails - the goal is already created
+		}
 
 		// Send notification
 		await sendPushToUser(
@@ -325,17 +379,19 @@ export const createGoal = async (req, res) => {
 			success: true,
 			data: {
 				...goal.toObject(),
-				subAccountBalance: subAccount.balance,
-				isLocked: subAccount.isLocked,
+				subAccountBalance: subAccount?.balance || 0,
+				isLocked: subAccount?.isLocked || false,
 			},
 			message: "Goal created successfully",
 		});
 	} catch (err) {
-		console.error("Create goal error:", err);
-		res.status(500).json({ error: err.message });
+		console.error("❌ Create goal error:", err);
+		res.status(500).json({
+			error: err.message,
+			details: err.stack,
+		});
 	}
 };
-
 
 export const updateGoal = async (req, res) => {
 	try {
