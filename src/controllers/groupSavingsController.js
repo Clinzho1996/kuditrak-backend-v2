@@ -399,10 +399,14 @@ export const createGroup = async (req, res) => {
 	}
 };
 
+// controllers/groupSavingsController.js - Fix getGroupDetails
+
 export const getGroupDetails = async (req, res) => {
 	try {
 		const { groupId } = req.params;
 		const userId = req.user._id;
+
+		console.log("🔍 Fetching group details for:", groupId);
 
 		const group = await GroupSavings.findOne({
 			_id: groupId,
@@ -413,6 +417,7 @@ export const getGroupDetails = async (req, res) => {
 			return res.status(404).json({ error: "Group not found" });
 		}
 
+		// Check if user is a member
 		const member = await GroupMember.findOne({
 			groupId: group._id,
 			userId,
@@ -425,21 +430,29 @@ export const getGroupDetails = async (req, res) => {
 				.json({ error: "You are not a member of this group" });
 		}
 
+		// ✅ Get all members with populated user details
 		const members = await GroupMember.find({
 			groupId: group._id,
 			status: "active",
 		}).populate("userId", "fullName email profileImage");
 
+		// ✅ Get contributions with populated member details
 		const contributions = await GroupContribution.find({
 			groupId: group._id,
 		})
 			.sort({ createdAt: -1 })
-			.limit(20);
+			.limit(20)
+			.populate("memberId", "fullName email profileImage"); // ✅ Populate memberId
 
+		// Get group balance
 		const subAccount = await AnchorSubAccount.findOne({
 			userId: group.createdBy,
 			subAccountId: group.subAccountId,
 		});
+
+		console.log(
+			`✅ Found ${members.length} members and ${contributions.length} contributions`,
+		);
 
 		res.status(200).json({
 			success: true,
@@ -454,12 +467,14 @@ export const getGroupDetails = async (req, res) => {
 			},
 		});
 	} catch (err) {
-		console.error("Get group details error:", err);
-		res.status(500).json({ error: err.message });
+		console.error("❌ Get group details error:", err);
+		res.status(500).json({
+			success: false,
+			error: err.message,
+			message: "Failed to get group details",
+		});
 	}
 };
-
-// controllers/groupSavingsController.js - Fix getUserGroups
 
 export const getUserGroups = async (req, res) => {
 	try {
@@ -1133,6 +1148,7 @@ export const getGroupContributions = async (req, res) => {
 			return res.status(404).json({ error: "Group not found" });
 		}
 
+		// ✅ Populate memberId with user details
 		const contributions = await GroupContribution.find({
 			groupId: group._id,
 		})
@@ -1156,8 +1172,12 @@ export const getGroupContributions = async (req, res) => {
 			},
 		});
 	} catch (err) {
-		console.error("Get group contributions error:", err);
-		res.status(500).json({ error: err.message });
+		console.error("❌ Get group contributions error:", err);
+		res.status(500).json({
+			success: false,
+			error: err.message,
+			message: "Failed to get group contributions",
+		});
 	}
 };
 
