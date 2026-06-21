@@ -558,9 +558,6 @@ export const updateGoal = async (req, res) => {
 		res.status(500).json({ error: err.message });
 	}
 };
-/**
- * Delete goal
- */
 
 // controllers/userGoalController.js - Fixed deleteGoal
 
@@ -578,6 +575,14 @@ export const deleteGoal = async (req, res) => {
 		if (!goal) {
 			return res.status(404).json({ error: "Goal not found" });
 		}
+
+		console.log("📊 Goal found:", {
+			id: goal._id,
+			name: goal.name,
+			allocatedAmount: goal.allocatedAmount,
+			subAccountId: goal.subAccountId,
+			lockType: goal.lockType,
+		});
 
 		// ✅ Initialize variables
 		let subAccount = null;
@@ -610,13 +615,14 @@ export const deleteGoal = async (req, res) => {
 		}
 
 		console.log("📊 Wallet before deletion:", {
+			_id: wallet._id,
 			balance: wallet.balance,
 			allocated: wallet.allocated || 0,
 			available: wallet.available || 0,
 		});
 
-		// ✅ CRITICAL FIX: Check BOTH sub-account balance AND goal.allocatedAmount
-		// The funds might be in the wallet's "allocated" field, not in the sub-account
+		// ✅ The total funds to refund is the goal's allocatedAmount
+		// plus any funds in the sub-account
 		const totalAllocatedFunds = subAccountBalance + (goal.allocatedAmount || 0);
 
 		console.log(
@@ -662,18 +668,23 @@ export const deleteGoal = async (req, res) => {
 				}
 			}
 
-			// ✅ Refund to main wallet
+			// ✅ CRITICAL FIX: Directly add refund to wallet balance
 			wallet.balance += refundAmount;
 
-			// ✅ Reduce allocated by the total amount (not just refundAmount)
-			wallet.allocated = Math.max(
-				0,
-				(wallet.allocated || 0) - totalAllocatedFunds,
-			);
-			wallet.available = wallet.balance - wallet.allocated;
+			// ✅ Reduce allocated amount (if the field exists)
+			if (wallet.allocated !== undefined) {
+				wallet.allocated = Math.max(
+					0,
+					(wallet.allocated || 0) - totalAllocatedFunds,
+				);
+			}
+
+			// ✅ Update available balance
+			wallet.available = wallet.balance - (wallet.allocated || 0);
 			await wallet.save();
 
 			console.log("📊 Wallet after refund:", {
+				_id: wallet._id,
 				balance: wallet.balance,
 				allocated: wallet.allocated || 0,
 				available: wallet.available || 0,
@@ -709,7 +720,7 @@ export const deleteGoal = async (req, res) => {
 			console.log("ℹ️ No funds to refund");
 		}
 
-		// ✅ Reset goal's allocatedAmount to 0 (in case it wasn't in sub-account)
+		// ✅ Reset goal's allocatedAmount to 0
 		goal.allocatedAmount = 0;
 		await goal.save();
 
@@ -746,7 +757,7 @@ export const deleteGoal = async (req, res) => {
 			wasLocked: goal.commitmentSettings?.enabled || false,
 		});
 	} catch (err) {
-		console.error("Delete goal error:", err);
+		console.error("❌ Delete goal error:", err);
 		res.status(500).json({ error: err.message });
 	}
 };

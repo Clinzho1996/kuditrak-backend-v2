@@ -35,6 +35,18 @@ const anchorWalletSchema = new mongoose.Schema({
 		default: 0,
 		min: 0,
 	},
+	allocated: {
+		// ✅ This field must exist
+		type: Number,
+		default: 0,
+		min: 0,
+	},
+	available: {
+		// ✅ This field must exist
+		type: Number,
+		default: 0,
+		min: 0,
+	},
 
 	// Currency
 	currency: {
