@@ -109,6 +109,7 @@ const anchorTransactionSchema = new mongoose.Schema({
 	source: {
 		type: String,
 		enum: [
+			"request",
 			"wallet",
 			"card",
 			"bank_transfer",
