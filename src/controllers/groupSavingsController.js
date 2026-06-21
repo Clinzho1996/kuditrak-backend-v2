@@ -22,9 +22,6 @@ const generateGroupCode = () => {
 	return code;
 };
 
-/**
- * Get or create group sub-account (ledger)
- */
 const getOrCreateGroupSubAccount = async (userId, group) => {
 	let subAccount = await AnchorSubAccount.findOne({
 		userId,
@@ -32,6 +29,7 @@ const getOrCreateGroupSubAccount = async (userId, group) => {
 	});
 
 	if (!subAccount) {
+		// Get main wallet as parent
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -41,6 +39,7 @@ const getOrCreateGroupSubAccount = async (userId, group) => {
 			throw new Error("Wallet not found");
 		}
 
+		// ✅ Create ONLY AnchorSubAccount, NOT UserGoal
 		subAccount = await AnchorSubAccount.create({
 			userId,
 			parentWalletId: wallet._id,
@@ -48,7 +47,7 @@ const getOrCreateGroupSubAccount = async (userId, group) => {
 			name: group.name,
 			type: "savings",
 			balance: 0,
-			targetAmount: group.targetAmount || null,
+			targetAmount: null,
 			autoSave: {
 				enabled: false,
 				amount: 0,
@@ -75,7 +74,6 @@ const getOrCreateGroupSubAccount = async (userId, group) => {
 
 	return subAccount;
 };
-
 /**
  * Process payout for a group
  */
