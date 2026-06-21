@@ -1,5 +1,6 @@
 // controllers/userGoalController.js
 import cron from "node-cron";
+import AllocationRecord from "../models/AllocationRecord.js";
 import AnchorSubAccount from "../models/AnchorSubAccount.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
 import AnchorWallet from "../models/AnchorWallet.js";
