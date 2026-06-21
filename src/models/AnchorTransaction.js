@@ -70,6 +70,7 @@ const anchorTransactionSchema = new mongoose.Schema({
 			"withdrawal",
 			"transfer",
 			"payment",
+			"platform_wallet",
 			"card_purchase",
 			"fee",
 			"refund",
