@@ -9,6 +9,7 @@ import Wallet from "../models/Wallet.js";
 import { getOrCreateAnchorCustomer } from "../services/anchorCustomerService.js";
 import { sendGoalNotification } from "../services/notificationService.js";
 import { sendPushToUser } from "../services/pushService.js";
+import Transaction from "../models/Transaction.js";
 
 // Store scheduled jobs
 const scheduledJobs = new Map();
