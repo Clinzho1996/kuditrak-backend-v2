@@ -6,6 +6,7 @@ import {
 	deleteGoal,
 	getGoalById,
 	getGoalStats,
+	getGoalTransactions,
 	listGoals,
 	releaseFromCommitment,
 	toggleAutoAllocate,
@@ -31,6 +32,8 @@ router.delete("/:id", deleteGoal); // Delete a goal
 router.post("/:id/allocate", allocateToGoal); // Designate funds to goal (was: credit)
 router.post("/:id/withdraw", withdrawDesignatedFunds); // Release designated funds (was: withdraw)
 
+// routes/savingsRoutes.js
+router.get("/:id/transactions", getGoalTransactions);
 // Commitment management (was: lock/unlock)
 router.post("/:id/commit", commitToGoal); // Commit to goal with release date
 router.post("/:id/release", releaseFromCommitment); // Release from commitment

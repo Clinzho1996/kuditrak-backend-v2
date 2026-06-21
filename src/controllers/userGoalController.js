@@ -955,6 +955,98 @@ export const getGoalStats = async (req, res) => {
 	}
 };
 
+// controllers/userGoalController.js - Add this function
+
+/**
+ * Get transactions for a specific goal
+ */
+export const getGoalTransactions = async (req, res) => {
+	try {
+		const { id } = req.params;
+		const userId = req.user._id;
+
+		const goal = await UserGoal.findOne({ _id: id, userId });
+		if (!goal) {
+			return res.status(404).json({ error: "Goal not found" });
+		}
+
+		// Get transactions from AllocationRecord
+		const allocations = await AllocationRecord.find({
+			goalId: goal._id,
+			userId: userId,
+		})
+			.sort({ timestamp: -1 })
+			.limit(50)
+			.lean();
+
+		// Format transactions
+		const transactions = allocations.map((record) => ({
+			_id: record._id,
+			type: record.type === "auto_allocation" ? "allocate" : "allocate",
+			amount: record.amount,
+			description:
+				record.type === "auto_allocation"
+					? "Auto-Save Deposit"
+					: "Manual Deposit",
+			createdAt: record.timestamp,
+			balanceAfter: 0, // You may want to calculate this based on running total
+		}));
+
+		// Also get withdrawal transactions from AnchorTransaction if available
+		try {
+			const withdrawals = await AnchorTransaction.find({
+				"metadata.goalId": goal._id,
+				userId: userId,
+				category: "withdrawal",
+			})
+				.sort({ createdAt: -1 })
+				.limit(20)
+				.lean();
+
+			withdrawals.forEach((tx) => {
+				transactions.push({
+					_id: tx._id,
+					type: "withdraw",
+					amount: tx.amount,
+					description: "Withdrawal",
+					createdAt: tx.createdAt,
+					balanceAfter: 0,
+				});
+			});
+		} catch (err) {
+			console.log("No withdrawal transactions found");
+		}
+
+		// Sort by date (newest first)
+		transactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+		// Calculate running balance
+		let runningBalance = goal.allocatedAmount || 0;
+		// Reverse to calculate from oldest to newest
+		const reversed = [...transactions].reverse();
+		for (const tx of reversed) {
+			if (tx.type === "withdraw") {
+				runningBalance += tx.amount;
+				tx.balanceAfter = runningBalance;
+			} else {
+				runningBalance -= tx.amount;
+				tx.balanceAfter = runningBalance;
+			}
+		}
+		// Reverse back to newest first
+		transactions.reverse();
+
+		res.status(200).json({
+			success: true,
+			transactions: transactions,
+			total: transactions.length,
+		});
+	} catch (err) {
+		console.error("Get goal transactions error:", err);
+		res.status(500).json({ error: err.message });
+	}
+};
+
 // Export all functions
 export default {
 	listGoals,
@@ -968,4 +1060,5 @@ export default {
 	allocateToGoal,
 	withdrawDesignatedFunds,
 	getGoalStats,
+	getGoalTransactions,
 };
