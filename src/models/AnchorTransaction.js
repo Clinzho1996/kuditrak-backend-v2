@@ -141,6 +141,7 @@ const anchorTransactionSchema = new mongoose.Schema({
 			"card",
 			"bank_transfer",
 			"virtual_account",
+			"platform_wallet",
 			"sub_account",
 			"external_bank",
 			"manual",
