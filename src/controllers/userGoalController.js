@@ -562,6 +562,8 @@ export const updateGoal = async (req, res) => {
  * Delete goal
  */
 
+// controllers/userGoalController.js - Fixed deleteGoal
+
 export const deleteGoal = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -577,10 +579,14 @@ export const deleteGoal = async (req, res) => {
 			return res.status(404).json({ error: "Goal not found" });
 		}
 
-		// ✅ Get sub-account to check balance
+		// ✅ Initialize variables outside the block
 		let subAccount = null;
 		let subAccountBalance = 0;
+		let refundAmount = 0;
+		let penaltyApplied = 0;
+		let refundMessage = "";
 
+		// ✅ Get sub-account to check balance
 		if (goal.subAccountId) {
 			subAccount = await AnchorSubAccount.findOne({
 				userId: req.user._id,
@@ -592,9 +598,6 @@ export const deleteGoal = async (req, res) => {
 			}
 		}
 
-		let refundMessage = "";
-		let penaltyApplied = 0;
-
 		// ✅ If there are funds in the sub-account, refund to main wallet
 		if (subAccountBalance > 0) {
 			const wallet = await AnchorWallet.findOne({
@@ -603,7 +606,7 @@ export const deleteGoal = async (req, res) => {
 			});
 
 			if (wallet) {
-				let refundAmount = subAccountBalance;
+				refundAmount = subAccountBalance;
 
 				// ✅ Check if goal is locked (Soft Lock or Hard Lock)
 				const isLocked = goal.commitmentSettings?.enabled || false;
@@ -723,7 +726,7 @@ export const deleteGoal = async (req, res) => {
 			success: true,
 			message: "Goal deleted successfully",
 			refundAmount: refundAmount || 0,
-			penaltyApplied: penaltyApplied,
+			penaltyApplied: penaltyApplied || 0,
 			lockType: goal.lockType,
 			wasLocked: goal.commitmentSettings?.enabled || false,
 		});
