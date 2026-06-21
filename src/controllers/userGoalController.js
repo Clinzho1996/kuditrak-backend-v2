@@ -270,18 +270,12 @@ export const createGoal = async (req, res) => {
 			releaseDate,
 			icon = "💰",
 			color = "#4F46E5",
+			lockType, // ✅ Add this
 		} = req.body;
 
-		// Get main wallet
 		const wallet = await getMainWallet(req.user._id);
 
-		// ✅ FIX: Convert frequency to valid enum value
-		let validFrequency = "monthly";
-		if (frequency && ["daily", "weekly", "monthly"].includes(frequency)) {
-			validFrequency = frequency;
-		}
-
-		// Create goal
+		// ✅ Store lockType in metadata or as a top-level field
 		const goal = new UserGoal({
 			userId: req.user._id,
 			walletId: wallet._id,
@@ -290,8 +284,9 @@ export const createGoal = async (req, res) => {
 			allocatedAmount: 0,
 			icon,
 			color,
+			lockType: lockType || (commitmentEnabled ? "Soft Lock" : "Flexible"), // ✅ Store lockType
 			allocationSchedule: {
-				frequency: validFrequency, // ✅ Use valid frequency
+				frequency: frequency || "monthly",
 				amount: autoAllocateAmount || 0,
 				autoAllocateEnabled: autoAllocateEnabled || false,
 			},
@@ -341,7 +336,6 @@ export const createGoal = async (req, res) => {
 	}
 };
 
-// controllers/userGoalController.js - Fixed updateGoal
 
 export const updateGoal = async (req, res) => {
 	try {
@@ -372,12 +366,16 @@ export const updateGoal = async (req, res) => {
 		if (icon) goal.icon = icon;
 		if (color) goal.color = color;
 
-		// ✅ FIX: Handle Lock Type - ALWAYS update based on lockType
+		// ✅ Update lockType if provided
+		if (lockType) {
+			goal.lockType = lockType;
+		}
+
+		// Handle Lock Type / Commitment Settings
 		if (lockType !== undefined) {
 			const isLocked = lockType === "Soft Lock" || lockType === "Hard Lock";
 
 			if (isLocked && releaseDate) {
-				// ✅ Force enable commitment when lock is selected
 				goal.commitmentSettings = {
 					enabled: true,
 					releaseDate: new Date(releaseDate),
@@ -385,21 +383,16 @@ export const updateGoal = async (req, res) => {
 					originalGoalAmount:
 						goal.commitmentSettings?.originalGoalAmount || goal.goalAmount,
 				};
-				console.log(`🔒 Goal ${goal._id} locked until ${releaseDate}`);
 			} else {
-				// Disable commitment (Flexible)
 				goal.commitmentSettings = {
 					enabled: false,
 					releaseDate: null,
 					committedAt: null,
 					originalGoalAmount: null,
 				};
-				console.log(`🔓 Goal ${goal._id} is now flexible`);
 			}
 		} else if (releaseDate !== undefined) {
-			// If only releaseDate is provided (without lockType)
 			if (releaseDate) {
-				// ✅ Auto-enable if a date is provided
 				goal.commitmentSettings = {
 					...goal.commitmentSettings,
 					enabled: true,
@@ -441,7 +434,7 @@ export const updateGoal = async (req, res) => {
 						: goal.allocationSchedule?.autoAllocateEnabled;
 
 			goal.allocationSchedule = {
-				frequency: newFrequency || "none",
+				frequency: newFrequency || "monthly",
 				amount: newAmount || 0,
 				autoAllocateEnabled: newAutoAllocateEnabled || false,
 			};
@@ -494,12 +487,6 @@ export const updateGoal = async (req, res) => {
 				subAccountId: goal.subAccountId,
 			});
 		}
-
-		console.log(`✅ Goal ${goal._id} updated:`, {
-			name: goal.name,
-			lockEnabled: goal.commitmentSettings?.enabled,
-			releaseDate: goal.commitmentSettings?.releaseDate,
-		});
 
 		res.json({
 			success: true,

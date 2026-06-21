@@ -1,100 +1,104 @@
-// backend/models/AnchorSubAccount.js
+// backend/models/UserGoal.js - Add lockType field
+
 import mongoose from "mongoose";
 
-const anchorSubAccountSchema = new mongoose.Schema({
+const userGoalSchema = new mongoose.Schema({
 	userId: {
 		type: mongoose.Schema.Types.ObjectId,
 		ref: "User",
 		required: true,
 		index: true,
 	},
-
-	parentWalletId: {
+	walletId: {
 		type: mongoose.Schema.Types.ObjectId,
 		ref: "AnchorWallet",
 		required: true,
 	},
-
-	// Sub-account details
-	subAccountId: {
-		type: String,
-		required: true,
-		unique: true,
-	},
-
-	// Sub-account name
 	name: {
 		type: String,
 		required: true,
 	},
-
-	// Sub-account type
-	type: {
-		type: String,
-		enum: ["savings", "goal", "budget", "business", "family"],
-		default: "savings",
+	goalAmount: {
+		type: Number,
+		required: true,
+		min: 0,
 	},
-
-	// Balance
-	balance: {
+	allocatedAmount: {
 		type: Number,
 		default: 0,
 		min: 0,
 	},
-
-	// Target amount (for goals)
-	targetAmount: {
-		type: Number,
+	// ✅ Add lockType field
+	lockType: {
+		type: String,
+		enum: ["Flexible", "Soft Lock", "Hard Lock"],
+		default: "Flexible",
+	},
+	icon: {
+		type: String,
+		default: "💰",
+	},
+	color: {
+		type: String,
+		default: "#4F46E5",
+	},
+	subAccountId: {
+		type: String,
 		default: null,
 	},
-
-	// Auto-save settings
-	autoSave: {
-		enabled: { type: Boolean, default: false },
-		amount: { type: Number, default: 0 },
+	allocationSchedule: {
 		frequency: {
 			type: String,
-			enum: ["daily", "weekly", "monthly"],
+			enum: ["daily", "weekly", "monthly", "bi-weekly", "none"],
 			default: "monthly",
 		},
-		dayOfMonth: { type: Number, default: 1 },
+		amount: {
+			type: Number,
+			default: 0,
+		},
+		autoAllocateEnabled: {
+			type: Boolean,
+			default: false,
+		},
 	},
-
-	// Lock settings
-	lockSettings: {
-		enabled: { type: Boolean, default: false },
-		unlockDate: { type: Date, default: null },
-		lockedAt: { type: Date, default: null },
+	commitmentSettings: {
+		enabled: {
+			type: Boolean,
+			default: false,
+		},
+		releaseDate: {
+			type: Date,
+			default: null,
+		},
+		committedAt: {
+			type: Date,
+			default: null,
+		},
+		originalGoalAmount: {
+			type: Number,
+			default: null,
+		},
 	},
-
-	// Sub-account status
-	status: {
-		type: String,
-		enum: ["active", "frozen", "closed", "completed"],
-		default: "active",
+	createdAt: {
+		type: Date,
+		default: Date.now,
 	},
-
-	// Color/icon for UI
-	icon: { type: String, default: "💰" },
-	color: { type: String, default: "#4F46E5" },
-
-	metadata: {
-		type: mongoose.Schema.Types.Mixed,
-		default: {},
+	updatedAt: {
+		type: Date,
+		default: Date.now,
 	},
-
-	createdAt: { type: Date, default: Date.now },
-	updatedAt: { type: Date, default: Date.now },
 });
 
-anchorSubAccountSchema.index({ userId: 1, parentWalletId: 1 });
-anchorSubAccountSchema.index({ subAccountId: 1 });
-
-// Virtual for isLocked
-anchorSubAccountSchema.virtual("isLocked").get(function () {
-	if (!this.lockSettings.enabled) return false;
-	if (!this.lockSettings.unlockDate) return false;
-	return new Date() < this.lockSettings.unlockDate;
+// Virtual for isCommitted
+userGoalSchema.virtual("isCommitted").get(function () {
+	return this.commitmentSettings?.enabled || false;
 });
 
-export default mongoose.model("AnchorSubAccount", anchorSubAccountSchema);
+// Virtual for canReleaseEarly
+userGoalSchema.virtual("canReleaseEarly").get(function () {
+	if (!this.commitmentSettings?.enabled) return true;
+	if (!this.commitmentSettings?.releaseDate) return true;
+	return new Date() >= this.commitmentSettings.releaseDate;
+});
+
+export default mongoose.model("UserGoal", userGoalSchema);
