@@ -71,6 +71,7 @@ const anchorTransactionSchema = new mongoose.Schema({
 			"transfer",
 			"payment",
 			"penalty",
+			"group_payout",
 			"platform_wallet",
 			"card_purchase",
 			"fee",
