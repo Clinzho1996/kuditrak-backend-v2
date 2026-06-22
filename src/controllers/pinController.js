@@ -151,6 +151,8 @@ export const updateTransactionPin = async (req, res) => {
 	}
 };
 
+// backend/controllers/pinController.js - Updated with debugging
+
 /**
  * Verify transaction PIN
  */
@@ -158,6 +160,9 @@ export const verifyTransactionPin = async (req, res) => {
 	try {
 		const userId = req.user._id;
 		const { pin } = req.body;
+
+		console.log("🔵 Verifying PIN for user:", userId);
+		console.log("🔵 PIN provided:", pin);
 
 		if (!pin || !/^\d{6}$/.test(pin)) {
 			return res.status(400).json({
@@ -167,6 +172,14 @@ export const verifyTransactionPin = async (req, res) => {
 		}
 
 		const pinRecord = await TransactionPin.findOne({ userId });
+
+		console.log("🔵 PIN record found:", {
+			hasPin: !!pinRecord,
+			hasSetPin: pinRecord?.hasSetPin,
+			pinHash: pinRecord?.pinHash ? "HASH_EXISTS" : "NO_HASH",
+			pinSalt: pinRecord?.pinSalt ? "SALT_EXISTS" : "NO_SALT",
+		});
+
 		if (!pinRecord || !pinRecord.hasSetPin) {
 			return res.status(400).json({
 				success: false,
@@ -191,7 +204,14 @@ export const verifyTransactionPin = async (req, res) => {
 			});
 		}
 
+		// Compare the provided PIN with the stored hash
 		const isValid = await bcrypt.compare(pin, pinRecord.pinHash);
+
+		console.log("🔵 PIN verification result:", {
+			isValid,
+			providedPin: pin,
+			hashLength: pinRecord.pinHash?.length,
+		});
 
 		if (!isValid) {
 			pinRecord.failedAttempts += 1;
@@ -224,6 +244,8 @@ export const verifyTransactionPin = async (req, res) => {
 		pinRecord.isLocked = false;
 		pinRecord.lockedUntil = null;
 		await pinRecord.save();
+
+		console.log("✅ PIN verified successfully for user:", userId);
 
 		res.status(200).json({
 			success: true,

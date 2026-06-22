@@ -1,6 +1,5 @@
-// backend/models/TransactionPin.js - Fixed
+// backend/models/TransactionPin.js - Fixed (no pre-save hook)
 
-import bcrypt from "bcrypt";
 import mongoose from "mongoose";
 
 const transactionPinSchema = new mongoose.Schema({
@@ -43,15 +42,6 @@ const transactionPinSchema = new mongoose.Schema({
 	updatedAt: { type: Date, default: Date.now },
 });
 
-// Hash PIN before saving - FIXED
-transactionPinSchema.pre("save", async function () {
-	if (!this.isModified("pinHash")) return;
-
-	const salt = await bcrypt.genSalt(10);
-	this.pinSalt = salt;
-	this.pinHash = await bcrypt.hash(this.pinHash, salt);
-});
-
 // Method to verify PIN
 transactionPinSchema.methods.verifyPin = async function (pin) {
 	if (this.isLocked && this.lockedUntil && new Date() < this.lockedUntil) {
@@ -66,7 +56,7 @@ transactionPinSchema.methods.verifyPin = async function (pin) {
 
 		if (this.failedAttempts >= 5) {
 			this.isLocked = true;
-			this.lockedUntil = new Date(Date.now() + 30 * 60 * 1000); // Lock for 30 minutes
+			this.lockedUntil = new Date(Date.now() + 30 * 60 * 1000);
 		}
 
 		await this.save();
@@ -75,7 +65,6 @@ transactionPinSchema.methods.verifyPin = async function (pin) {
 		);
 	}
 
-	// Reset failed attempts on successful verification
 	this.failedAttempts = 0;
 	this.lastFailedAttempt = null;
 	this.isLocked = false;
