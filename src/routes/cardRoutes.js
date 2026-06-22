@@ -1,5 +1,6 @@
 // backend/routes/cardRoutes.js
 import express from "express";
+import { getNGNCardTransactions } from "../controllers/bridgecardCardController.js";
 import {
 	createCard,
 	deleteCard,
@@ -28,6 +29,7 @@ const router = express.Router();
 // ============= PUBLIC ROUTES (NO AUTH) =============
 // ✅ Exchange rate - public endpoint
 router.get("/exchange-rate", getExchangeRate);
+router.get("/transactions", getNGNCardTransactions);
 
 // ============= PROTECTED ROUTES (AUTH REQUIRED) =============
 router.use(protect);
