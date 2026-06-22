@@ -654,55 +654,6 @@ export const getUSDCardBalance = async (req, res) => {
 	}
 };
 
-/**
- * Unload USD Card
- */
-export const unloadUSDCard = async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const { cardId, amount, transactionReference = null } = req.body;
-
-		if (!amount || amount <= 0) {
-			return res.status(400).json({ error: "Valid amount required" });
-		}
-
-		const card = await BridgecardCard.findOne({ userId, cardId });
-		if (!card) {
-			return res.status(404).json({ error: "Card not found" });
-		}
-
-		// Check if enough balance
-		const balance = await bridgecardService.getCardBalance(card.cardId);
-		if (!balance.success || balance.availableBalance < amount) {
-			return res.status(400).json({ error: "Insufficient balance" });
-		}
-
-		const result = await bridgecardService.unloadCard(
-			card.cardId,
-			amount,
-			"USD",
-			transactionReference,
-		);
-
-		if (!result.success) {
-			return res.status(400).json({
-				success: false,
-				error: result.error,
-			});
-		}
-
-		res.status(200).json({
-			success: true,
-			message: "Card unloaded successfully",
-			transactionReference: result.transactionReference,
-			data: result.data,
-		});
-	} catch (error) {
-		console.error("Unload card error:", error);
-		res.status(500).json({ error: error.message });
-	}
-};
-
 export const fundIssuingWallet = async (req, res) => {
 	try {
 		// Only allow in development/sandbox
@@ -1358,8 +1309,142 @@ export const fundNGNCard = async (req, res) => {
 	}
 };
 
+// backend/controllers/bridgecardCardController.js - Updated unload functions
+
 /**
- * Unload NGN Card
+ * Unload USD Card - Updated to credit user's wallet
+ */
+export const unloadUSDCard = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { cardId, amount, transactionReference = null } = req.body;
+
+		if (!amount || amount <= 0) {
+			return res.status(400).json({ error: "Valid amount required" });
+		}
+
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return res.status(404).json({ error: "Card not found" });
+		}
+
+		// Check if enough balance on card
+		const balance = await bridgecardService.getCardBalance(card.cardId);
+		if (!balance.success || balance.availableBalance < amount) {
+			return res.status(400).json({ error: "Insufficient balance on card" });
+		}
+
+		// Unload from Bridgecard
+		const result = await bridgecardService.unloadCard(
+			card.cardId,
+			amount,
+			"USD",
+			transactionReference,
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		// ✅ CREDIT THE USER'S WALLET
+		// Find the user's main wallet
+		const AnchorWallet = await import("../models/AnchorWallet.js").then(
+			(m) => m.default,
+		);
+
+		const wallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
+
+		if (!wallet) {
+			return res.status(404).json({
+				success: false,
+				error: "Wallet not found",
+			});
+		}
+
+		// Convert USD to NGN if needed (using a fixed rate or API)
+		// For now, we'll assume the amount is already in the correct currency
+		let ngnAmount = amount;
+
+		// If card is USD, convert to NGN (simplified conversion)
+		if (card.currency === "USD") {
+			// Use a reasonable exchange rate (you should use a real API in production)
+			const usdToNgnRate = 1500; // Example rate
+			ngnAmount = amount * usdToNgnRate;
+		}
+
+		// Credit the wallet
+		wallet.balance += ngnAmount;
+		wallet.available = wallet.balance - (wallet.allocated || 0);
+		await wallet.save();
+
+		// Create transaction record for the credit
+		const AnchorTransaction =
+			await import("../models/AnchorTransaction.js").then((m) => m.default);
+
+		await AnchorTransaction.create({
+			userId,
+			anchorCustomerId: wallet.anchorCustomerId,
+			walletId: wallet._id,
+			amount: ngnAmount,
+			currency: "NGN",
+			type: "credit",
+			category: "card_unload",
+			status: "success",
+			description: `Funds withdrawn from card ending in ${card.last4}`,
+			source: "card",
+			destination: "wallet",
+			metadata: {
+				cardId: card.cardId,
+				cardLast4: card.last4,
+				originalAmount: amount,
+				originalCurrency: card.currency,
+				isCardUnload: true,
+				timestamp: new Date().toISOString(),
+			},
+		});
+
+		// Update card balance in local DB
+		const currentCardBalance = card.balance || 0;
+		card.balance = Math.max(0, currentCardBalance - amount);
+		await card.save();
+
+		await sendPushToUser(
+			userId,
+			"💸 Card Unloaded",
+			`${card.currency === "USD" ? "$" : "₦"}${amount} has been withdrawn from ${card.metaData?.cardName || "your card"} ending in ${card.last4}.`,
+			{
+				type: "card_unloaded",
+				cardId: card.cardId,
+				amount,
+				currency: card.currency,
+				newBalance: wallet.balance,
+			},
+		);
+
+		res.status(200).json({
+			success: true,
+			message: "Card unloaded successfully",
+			transactionReference: result.transactionReference,
+			data: {
+				...result.data,
+				walletNewBalance: wallet.balance,
+				amountInNGN: ngnAmount,
+			},
+		});
+	} catch (error) {
+		console.error("Unload card error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+/**
+ * Unload NGN Card - Updated to credit user's wallet
  */
 export const unloadNGNCard = async (req, res) => {
 	try {
@@ -1381,6 +1466,15 @@ export const unloadNGNCard = async (req, res) => {
 			});
 		}
 
+		// Check if enough balance on card
+		const balance = await bridgecardService.getNGNCardBalance(
+			card.cardholderId,
+		);
+		if (!balance.success || balance.balance < amount) {
+			return res.status(400).json({ error: "Insufficient balance on card" });
+		}
+
+		// Unload from Bridgecard
 		const result = await bridgecardService.unloadNGNCard(
 			card.cardId,
 			amount,
@@ -1394,25 +1488,83 @@ export const unloadNGNCard = async (req, res) => {
 			});
 		}
 
+		// ✅ CREDIT THE USER'S WALLET
+		const AnchorWallet = await import("../models/AnchorWallet.js").then(
+			(m) => m.default,
+		);
+
+		const wallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
+
+		if (!wallet) {
+			return res.status(404).json({
+				success: false,
+				error: "Wallet not found",
+			});
+		}
+
+		// Credit the wallet (amount is already in NGN)
+		wallet.balance += amount;
+		wallet.available = wallet.balance - (wallet.allocated || 0);
+		await wallet.save();
+
+		// Create transaction record for the credit
+		const AnchorTransaction =
+			await import("../models/AnchorTransaction.js").then((m) => m.default);
+
+		await AnchorTransaction.create({
+			userId,
+			anchorCustomerId: wallet.anchorCustomerId,
+			walletId: wallet._id,
+			amount: amount,
+			currency: "NGN",
+			type: "credit",
+			category: "card_unload",
+			status: "success",
+			description: `Funds withdrawn from NGN card ending in ${card.last4}`,
+			source: "card",
+			destination: "wallet",
+			metadata: {
+				cardId: card.cardId,
+				cardLast4: card.last4,
+				isCardUnload: true,
+				timestamp: new Date().toISOString(),
+			},
+		});
+
+		// Update card balance in local DB
+		const currentCardBalance = card.balance || 0;
+		card.balance = Math.max(0, currentCardBalance - amount);
+		await card.save();
+
 		await sendPushToUser(
 			userId,
 			"💸 NGN Card Unloaded",
-			`₦${amount} has been withdrawn from your NGN card ending in ${card.last4}.`,
-			{ type: "ngn_card_unloaded", cardId: card.cardId, amount },
+			`₦${amount} has been withdrawn from ${card.metaData?.cardName || "your card"} ending in ${card.last4}.`,
+			{
+				type: "ngn_card_unloaded",
+				cardId: card.cardId,
+				amount,
+				newBalance: wallet.balance,
+			},
 		);
 
 		res.status(200).json({
 			success: true,
 			message: "NGN card unloaded successfully",
 			transactionReference: result.transactionReference,
-			data: result.data,
+			data: {
+				...result.data,
+				walletNewBalance: wallet.balance,
+			},
 		});
 	} catch (error) {
 		console.error("Unload NGN card error:", error);
 		res.status(500).json({ error: error.message });
 	}
 };
-
 /**
  * Get NGN Card Balance
  */
@@ -1708,6 +1860,50 @@ export const mockDebitNGNCard = async (req, res) => {
 		});
 	} catch (error) {
 		console.error("Mock debit NGN card error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
+
+// backend/controllers/bridgecardCardController.js - Updated generic unload
+
+/**
+ * Unload Card (Generic - handles both USD and NGN)
+ */
+export const unloadCard = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { cardId, amount, transactionReference = null } = req.body;
+
+		if (!amount || amount <= 0) {
+			return res.status(400).json({
+				success: false,
+				error: "Valid amount required",
+			});
+		}
+
+		const card = await BridgecardCard.findOne({ userId, cardId });
+		if (!card) {
+			return res.status(404).json({
+				success: false,
+				error: "Card not found",
+			});
+		}
+
+		// Route to appropriate function based on currency
+		if (card.currency === "USD") {
+			// Reuse the USD unload logic
+			req.body.currency = "USD";
+			return unloadUSDCard(req, res);
+		} else if (card.currency === "NGN") {
+			return unloadNGNCard(req, res);
+		} else {
+			return res.status(400).json({
+				success: false,
+				error: "Unsupported currency",
+			});
+		}
+	} catch (error) {
+		console.error("Unload card error:", error);
 		res.status(500).json({ error: error.message });
 	}
 };
