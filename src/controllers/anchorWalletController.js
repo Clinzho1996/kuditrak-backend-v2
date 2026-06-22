@@ -13,9 +13,14 @@ import { sendPushToUser } from "../services/pushService.js";
 
 // ==================== PIN VERIFICATION MIDDLEWARE ====================
 
+// backend/controllers/anchorWalletController.js - Updated with better error handling
+
+import bcrypt from "bcrypt";
+
+// ==================== PIN VERIFICATION ====================
+
 /**
- * Middleware to verify transaction PIN
- * This should be used before any money movement
+ * Verify transaction PIN
  */
 const verifyPin = async (userId, pin) => {
 	if (!pin || !/^\d{6}$/.test(pin)) {
@@ -57,7 +62,6 @@ const verifyPin = async (userId, pin) => {
 		);
 	}
 
-	// Reset failed attempts on success
 	pinRecord.failedAttempts = 0;
 	pinRecord.lastFailedAttempt = null;
 	pinRecord.isLocked = false;
@@ -65,6 +69,351 @@ const verifyPin = async (userId, pin) => {
 	await pinRecord.save();
 
 	return true;
+};
+
+// ==================== SEND TO KUDITRAK USER ====================
+
+/**
+ * Send money to another Kuditrak user (internal wallet transfer)
+ */
+export const sendToKuditrakUser = async (req, res) => {
+	try {
+		const senderId = req.user._id;
+		const {
+			recipientEmail,
+			recipientPhone,
+			recipientHandle,
+			amount,
+			note,
+			pin,
+		} = req.body;
+
+		console.log("🔵 Send to Kuditrak user:", {
+			senderId: senderId.toString(),
+			recipientEmail,
+			recipientPhone,
+			recipientHandle,
+			amount,
+			note,
+			hasPin: !!pin,
+		});
+
+		// Validate amount
+		if (!amount || amount <= 0) {
+			console.log("❌ Invalid amount:", amount);
+			return res.status(400).json({
+				success: false,
+				error: "Invalid amount",
+				message: "Amount must be greater than 0",
+			});
+		}
+
+		if (amount < 1) {
+			console.log("❌ Amount too small:", amount);
+			return res.status(400).json({
+				success: false,
+				error: "Minimum amount is ₦1",
+				message: "Please enter a valid amount",
+			});
+		}
+
+		// ✅ VERIFY PIN
+		try {
+			await verifyPin(senderId, pin);
+			console.log("✅ PIN verified successfully");
+		} catch (pinError) {
+			console.log("❌ PIN verification failed:", pinError.message);
+			return res.status(400).json({
+				success: false,
+				error: pinError.message,
+				requiresPin: pinError.message.includes("No PIN set"),
+			});
+		}
+
+		// Find recipient by email, phone, or handle
+		let recipient;
+		if (recipientEmail) {
+			console.log("🔍 Searching for recipient by email:", recipientEmail);
+			recipient = await User.findOne({ email: recipientEmail });
+		} else if (recipientPhone) {
+			console.log("🔍 Searching for recipient by phone:", recipientPhone);
+			recipient = await User.findOne({ phoneNumber: recipientPhone });
+		} else if (recipientHandle) {
+			const cleanHandle = recipientHandle.startsWith("@")
+				? recipientHandle.substring(1)
+				: recipientHandle;
+			console.log("🔍 Searching for recipient by handle:", cleanHandle);
+			recipient = await User.findOne({
+				$or: [
+					{ fullName: { $regex: cleanHandle, $options: "i" } },
+					{ email: { $regex: cleanHandle, $options: "i" } },
+				],
+			});
+		}
+
+		if (!recipient) {
+			console.log("❌ Recipient not found");
+			return res.status(404).json({
+				success: false,
+				error: "Recipient not found",
+				message: "Could not find a Kuditrak user with that identifier",
+			});
+		}
+
+		console.log("✅ Recipient found:", {
+			id: recipient._id.toString(),
+			name: recipient.fullName,
+			email: recipient.email,
+		});
+
+		// Check if sender is trying to send to themselves
+		if (recipient._id.toString() === senderId.toString()) {
+			console.log("❌ Sender trying to send to themselves");
+			return res.status(400).json({
+				success: false,
+				error: "Invalid recipient",
+				message: "You cannot send money to yourself",
+			});
+		}
+
+		// Get sender's wallet
+		const senderWallet = await AnchorWallet.findOne({
+			userId: senderId,
+			walletType: "main",
+		});
+
+		if (!senderWallet) {
+			console.log("❌ Sender wallet not found");
+			return res.status(404).json({
+				success: false,
+				error: "Sender wallet not found",
+				message: "Please create a wallet first",
+				requiresWalletCreation: true,
+			});
+		}
+
+		console.log(`💰 Sender wallet balance: ${senderWallet.balance}`);
+
+		// Check sender's balance
+		if (senderWallet.balance < amount) {
+			console.log(
+				`❌ Insufficient balance: ${senderWallet.balance} < ${amount}`,
+			);
+			return res.status(400).json({
+				success: false,
+				error: "Insufficient balance",
+				available: senderWallet.balance,
+				requested: amount,
+				message: `Your balance (₦${senderWallet.balance.toLocaleString()}) is insufficient for this transfer`,
+			});
+		}
+
+		// Get recipient's wallet
+		let recipientWallet = await AnchorWallet.findOne({
+			userId: recipient._id,
+			walletType: "main",
+		});
+
+		// If recipient doesn't have a wallet, create one
+		if (!recipientWallet) {
+			console.log("🔄 Creating wallet for recipient:", recipient._id);
+
+			try {
+				const customerResult = await getOrCreateAnchorCustomer(recipient._id);
+				if (!customerResult.success) {
+					console.log(
+						"❌ Failed to create recipient customer:",
+						customerResult.error,
+					);
+					return res.status(400).json({
+						success: false,
+						error: "Could not create recipient wallet",
+						message: "Recipient account is not fully set up",
+					});
+				}
+
+				recipientWallet = await AnchorWallet.create({
+					userId: recipient._id,
+					anchorCustomerId: customerResult.customerId,
+					walletId: `local_${Date.now()}_${recipient._id.toString().slice(-6)}`,
+					walletType: "main",
+					balance: 0,
+					name: "Main Wallet",
+					currency: "NGN",
+					status: "active",
+					isLocal: true,
+				});
+				console.log("✅ Recipient wallet created");
+			} catch (walletError) {
+				console.error("❌ Error creating recipient wallet:", walletError);
+				return res.status(400).json({
+					success: false,
+					error: "Could not create recipient wallet",
+					message: "Failed to set up recipient account",
+				});
+			}
+		}
+
+		// Generate reference
+		const reference = `SEND_${Date.now()}_${senderId.toString().slice(-6)}`;
+		console.log("📝 Transaction reference:", reference);
+
+		// Perform the transfer (atomic operation)
+		const session = await mongoose.startSession();
+		session.startTransaction();
+
+		try {
+			// Deduct from sender
+			senderWallet.balance -= amount;
+			await senderWallet.save({ session });
+			console.log(
+				`✅ Deducted ${amount} from sender, new balance: ${senderWallet.balance}`,
+			);
+
+			// Add to recipient
+			recipientWallet.balance += amount;
+			await recipientWallet.save({ session });
+			console.log(
+				`✅ Added ${amount} to recipient, new balance: ${recipientWallet.balance}`,
+			);
+
+			// Create sender transaction (debit)
+			const senderTransaction = await AnchorTransaction.create(
+				[
+					{
+						userId: senderId,
+						anchorCustomerId: senderWallet.anchorCustomerId,
+						walletId: senderWallet._id,
+						amount: amount,
+						currency: "NGN",
+						type: "debit",
+						category: "transfer",
+						status: "success",
+						description: note
+							? `Sent to ${recipient.fullName}${note ? ` - ${note}` : ""}`
+							: `Sent to ${recipient.fullName}`,
+						source: "wallet",
+						destination: "wallet",
+						metadata: {
+							reference,
+							recipientId: recipient._id,
+							recipientName: recipient.fullName,
+							recipientEmail: recipient.email,
+							note: note || "",
+							isKuditrakTransfer: true,
+							timestamp: new Date().toISOString(),
+							pinVerified: true,
+						},
+					},
+				],
+				{ session },
+			);
+
+			// Create recipient transaction (credit)
+			const recipientTransaction = await AnchorTransaction.create(
+				[
+					{
+						userId: recipient._id,
+						anchorCustomerId: recipientWallet.anchorCustomerId,
+						walletId: recipientWallet._id,
+						amount: amount,
+						currency: "NGN",
+						type: "credit",
+						category: "transfer",
+						status: "success",
+						description: note
+							? `Received from ${req.user.fullName}${note ? ` - ${note}` : ""}`
+							: `Received from ${req.user.fullName}`,
+						source: "wallet",
+						destination: "wallet",
+						metadata: {
+							reference,
+							senderId: senderId,
+							senderName: req.user.fullName,
+							note: note || "",
+							isKuditrakTransfer: true,
+							timestamp: new Date().toISOString(),
+						},
+					},
+				],
+				{ session },
+			);
+
+			await session.commitTransaction();
+			console.log("✅ Transaction committed successfully");
+
+			// Send notifications
+			await sendPushToUser(
+				senderId,
+				"💸 Money Sent",
+				`You sent ₦${amount.toLocaleString()} to ${recipient.fullName}${
+					note ? ` (${note})` : ""
+				}`,
+				{
+					type: "money_sent",
+					amount,
+					recipientId: recipient._id,
+					recipientName: recipient.fullName,
+					reference,
+					newBalance: senderWallet.balance,
+				},
+			);
+
+			await sendPushToUser(
+				recipient._id,
+				"💰 Money Received",
+				`You received ₦${amount.toLocaleString()} from ${req.user.fullName}${
+					note ? ` (${note})` : ""
+				}`,
+				{
+					type: "money_received",
+					amount,
+					senderId: senderId,
+					senderName: req.user.fullName,
+					reference,
+					newBalance: recipientWallet.balance,
+				},
+			);
+
+			res.status(200).json({
+				success: true,
+				message: "Transfer completed successfully",
+				reference,
+				amount: amount,
+				recipient: {
+					id: recipient._id,
+					name: recipient.fullName,
+					email: recipient.email,
+				},
+				senderNewBalance: senderWallet.balance,
+				recipientNewBalance: recipientWallet.balance,
+				transactionId: senderTransaction[0]._id,
+				fee: 0,
+				note: note || "",
+				timestamp: new Date().toISOString(),
+			});
+		} catch (transactionError) {
+			console.error("❌ Transaction error:", transactionError);
+			await session.abortTransaction();
+			throw transactionError;
+		} finally {
+			session.endSession();
+		}
+	} catch (error) {
+		console.error("❌ Send to Kuditrak user error:", {
+			message: error.message,
+			stack: error.stack,
+			name: error.name,
+		});
+
+		// Send a detailed error response
+		res.status(500).json({
+			success: false,
+			error: error.message || "Failed to send money",
+			message:
+				error.message || "An unexpected error occurred while sending money",
+		});
+	}
 };
 
 // ==================== WALLET CREATION ====================
@@ -889,363 +1238,6 @@ export const verifyTopup = async (req, res) => {
 		res.status(500).json({ error: error.message });
 	}
 };
-
-// ==================== SEND MONEY (INTERNAL TRANSFER) ====================
-
-/**
- * Send money to another Kuditrak user (internal wallet transfer)
- * This matches the "Kuditrak User" tab in the frontend
- */
-// backend/controllers/anchorWalletController.js - Updated sendToKuditrakUser with better error handling
-
-/**
- * Send money to another Kuditrak user (internal wallet transfer)
- * Updated with PIN verification and better error handling
- */
-export const sendToKuditrakUser = async (req, res) => {
-	try {
-		const senderId = req.user._id;
-		const {
-			recipientEmail,
-			recipientPhone,
-			recipientHandle,
-			amount,
-			note,
-			pin,
-		} = req.body;
-
-		console.log("🔵 Send to Kuditrak user:", {
-			senderId: senderId.toString(),
-			recipientEmail,
-			recipientPhone,
-			recipientHandle,
-			amount,
-			note,
-			hasPin: !!pin,
-		});
-
-		// Validate amount
-		if (!amount || amount <= 0) {
-			console.log("❌ Invalid amount:", amount);
-			return res.status(400).json({
-				success: false,
-				error: "Invalid amount",
-				message: "Amount must be greater than 0",
-			});
-		}
-
-		if (amount < 1) {
-			console.log("❌ Amount too small:", amount);
-			return res.status(400).json({
-				success: false,
-				error: "Minimum amount is ₦1",
-				message: "Please enter a valid amount",
-			});
-		}
-
-		// ✅ VERIFY PIN
-		try {
-			await verifyPin(senderId, pin);
-			console.log("✅ PIN verified successfully");
-		} catch (pinError) {
-			console.log("❌ PIN verification failed:", pinError.message);
-			return res.status(400).json({
-				success: false,
-				error: pinError.message,
-				requiresPin: pinError.message.includes("No PIN set"),
-			});
-		}
-
-		// Find recipient by email, phone, or handle
-		let recipient;
-		if (recipientEmail) {
-			console.log("🔍 Searching for recipient by email:", recipientEmail);
-			recipient = await User.findOne({ email: recipientEmail });
-		} else if (recipientPhone) {
-			console.log("🔍 Searching for recipient by phone:", recipientPhone);
-			recipient = await User.findOne({ phoneNumber: recipientPhone });
-		} else if (recipientHandle) {
-			const cleanHandle = recipientHandle.startsWith("@")
-				? recipientHandle.substring(1)
-				: recipientHandle;
-			console.log("🔍 Searching for recipient by handle:", cleanHandle);
-			recipient = await User.findOne({
-				$or: [
-					{ fullName: { $regex: cleanHandle, $options: "i" } },
-					{ email: { $regex: cleanHandle, $options: "i" } },
-				],
-			});
-		}
-
-		if (!recipient) {
-			console.log("❌ Recipient not found");
-			return res.status(404).json({
-				success: false,
-				error: "Recipient not found",
-				message: "Could not find a Kuditrak user with that identifier",
-			});
-		}
-
-		console.log("✅ Recipient found:", {
-			id: recipient._id.toString(),
-			name: recipient.fullName,
-			email: recipient.email,
-		});
-
-		// Check if sender is trying to send to themselves
-		if (recipient._id.toString() === senderId.toString()) {
-			console.log("❌ Sender trying to send to themselves");
-			return res.status(400).json({
-				success: false,
-				error: "Invalid recipient",
-				message: "You cannot send money to yourself",
-			});
-		}
-
-		// Get sender's wallet
-		const senderWallet = await AnchorWallet.findOne({
-			userId: senderId,
-			walletType: "main",
-		});
-
-		if (!senderWallet) {
-			console.log("❌ Sender wallet not found");
-			return res.status(404).json({
-				success: false,
-				error: "Sender wallet not found",
-				message: "Please create a wallet first",
-				requiresWalletCreation: true,
-			});
-		}
-
-		console.log("💰 Sender wallet balance:", senderWallet.balance);
-
-		// Check sender's balance
-		if (senderWallet.balance < amount) {
-			console.log(
-				`❌ Insufficient balance: ${senderWallet.balance} < ${amount}`,
-			);
-			return res.status(400).json({
-				success: false,
-				error: "Insufficient balance",
-				available: senderWallet.balance,
-				requested: amount,
-				message: `Your balance (₦${senderWallet.balance.toLocaleString()}) is insufficient for this transfer`,
-			});
-		}
-
-		// Get recipient's wallet
-		let recipientWallet = await AnchorWallet.findOne({
-			userId: recipient._id,
-			walletType: "main",
-		});
-
-		// If recipient doesn't have a wallet, create one
-		if (!recipientWallet) {
-			console.log("🔄 Creating wallet for recipient:", recipient._id);
-
-			try {
-				const customerResult = await getOrCreateAnchorCustomer(recipient._id);
-				if (!customerResult.success) {
-					console.log(
-						"❌ Failed to create recipient customer:",
-						customerResult.error,
-					);
-					return res.status(400).json({
-						success: false,
-						error: "Could not create recipient wallet",
-						message: "Recipient account is not fully set up",
-					});
-				}
-
-				recipientWallet = await AnchorWallet.create({
-					userId: recipient._id,
-					anchorCustomerId: customerResult.customerId,
-					walletId: `local_${Date.now()}_${recipient._id.toString().slice(-6)}`,
-					walletType: "main",
-					balance: 0,
-					name: "Main Wallet",
-					currency: "NGN",
-					status: "active",
-					isLocal: true,
-				});
-				console.log("✅ Recipient wallet created");
-			} catch (walletError) {
-				console.error("❌ Error creating recipient wallet:", walletError);
-				return res.status(400).json({
-					success: false,
-					error: "Could not create recipient wallet",
-					message: "Failed to set up recipient account",
-				});
-			}
-		}
-
-		// Generate reference
-		const reference = `SEND_${Date.now()}_${senderId.toString().slice(-6)}`;
-		console.log("📝 Transaction reference:", reference);
-
-		// Perform the transfer (atomic operation)
-		const session = await mongoose.startSession();
-		session.startTransaction();
-
-		try {
-			// Deduct from sender
-			senderWallet.balance -= amount;
-			await senderWallet.save({ session });
-			console.log(
-				`✅ Deducted ${amount} from sender, new balance: ${senderWallet.balance}`,
-			);
-
-			// Add to recipient
-			recipientWallet.balance += amount;
-			await recipientWallet.save({ session });
-			console.log(
-				`✅ Added ${amount} to recipient, new balance: ${recipientWallet.balance}`,
-			);
-
-			// Create sender transaction (debit)
-			const senderTransaction = await AnchorTransaction.create(
-				[
-					{
-						userId: senderId,
-						anchorCustomerId: senderWallet.anchorCustomerId,
-						walletId: senderWallet._id,
-						amount: amount,
-						currency: "NGN",
-						type: "debit",
-						category: "transfer",
-						status: "success",
-						description: note
-							? `Sent to ${recipient.fullName}${note ? ` - ${note}` : ""}`
-							: `Sent to ${recipient.fullName}`,
-						source: "wallet",
-						destination: "wallet",
-						metadata: {
-							reference,
-							recipientId: recipient._id,
-							recipientName: recipient.fullName,
-							recipientEmail: recipient.email,
-							note: note || "",
-							isKuditrakTransfer: true,
-							timestamp: new Date().toISOString(),
-							pinVerified: true,
-						},
-					},
-				],
-				{ session },
-			);
-
-			// Create recipient transaction (credit)
-			const recipientTransaction = await AnchorTransaction.create(
-				[
-					{
-						userId: recipient._id,
-						anchorCustomerId: recipientWallet.anchorCustomerId,
-						walletId: recipientWallet._id,
-						amount: amount,
-						currency: "NGN",
-						type: "credit",
-						category: "transfer",
-						status: "success",
-						description: note
-							? `Received from ${req.user.fullName}${note ? ` - ${note}` : ""}`
-							: `Received from ${req.user.fullName}`,
-						source: "wallet",
-						destination: "wallet",
-						metadata: {
-							reference,
-							senderId: senderId,
-							senderName: req.user.fullName,
-							note: note || "",
-							isKuditrakTransfer: true,
-							timestamp: new Date().toISOString(),
-						},
-					},
-				],
-				{ session },
-			);
-
-			await session.commitTransaction();
-			console.log("✅ Transaction committed successfully");
-
-			// Send notifications
-			await sendPushToUser(
-				senderId,
-				"💸 Money Sent",
-				`You sent ₦${amount.toLocaleString()} to ${recipient.fullName}${
-					note ? ` (${note})` : ""
-				}`,
-				{
-					type: "money_sent",
-					amount,
-					recipientId: recipient._id,
-					recipientName: recipient.fullName,
-					reference,
-					newBalance: senderWallet.balance,
-				},
-			);
-
-			await sendPushToUser(
-				recipient._id,
-				"💰 Money Received",
-				`You received ₦${amount.toLocaleString()} from ${req.user.fullName}${
-					note ? ` (${note})` : ""
-				}`,
-				{
-					type: "money_received",
-					amount,
-					senderId: senderId,
-					senderName: req.user.fullName,
-					reference,
-					newBalance: recipientWallet.balance,
-				},
-			);
-
-			res.status(200).json({
-				success: true,
-				message: "Transfer completed successfully",
-				reference,
-				amount: amount,
-				recipient: {
-					id: recipient._id,
-					name: recipient.fullName,
-					email: recipient.email,
-				},
-				senderNewBalance: senderWallet.balance,
-				recipientNewBalance: recipientWallet.balance,
-				transactionId: senderTransaction[0]._id,
-				fee: 0,
-				note: note || "",
-				timestamp: new Date().toISOString(),
-			});
-		} catch (transactionError) {
-			console.error("❌ Transaction error:", transactionError);
-			await session.abortTransaction();
-			throw transactionError;
-		} finally {
-			session.endSession();
-		}
-	} catch (error) {
-		console.error("❌ Send to Kuditrak user error:", {
-			message: error.message,
-			stack: error.stack,
-			name: error.name,
-		});
-
-		// Send a detailed error response
-		res.status(500).json({
-			success: false,
-			error: error.message || "Failed to send money",
-			message:
-				error.message || "An unexpected error occurred while sending money",
-			details: process.env.NODE_ENV === "development" ? error.stack : undefined,
-		});
-	}
-};
-
-// ==================== WITHDRAW TO BANK ====================
-
-// backend/controllers/anchorWalletController.js - Updated withdrawToBank
 
 /**
  * Withdraw money to an external bank account
