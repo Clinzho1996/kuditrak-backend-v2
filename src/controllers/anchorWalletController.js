@@ -5,10 +5,67 @@ import AnchorSubAccount from "../models/AnchorSubAccount.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
 import AnchorVirtualAccount from "../models/AnchorVirtualAccount.js";
 import AnchorWallet from "../models/AnchorWallet.js";
+import TransactionPin from "../models/TransactionPin.js";
 import User from "../models/User.js";
 import { getOrCreateAnchorCustomer } from "../services/anchorCustomerService.js";
 import anchorService from "../services/anchorService.js";
 import { sendPushToUser } from "../services/pushService.js";
+
+// ==================== PIN VERIFICATION MIDDLEWARE ====================
+
+/**
+ * Middleware to verify transaction PIN
+ * This should be used before any money movement
+ */
+const verifyPin = async (userId, pin) => {
+	if (!pin || !/^\d{6}$/.test(pin)) {
+		throw new Error("PIN must be exactly 6 digits");
+	}
+
+	const pinRecord = await TransactionPin.findOne({ userId });
+	if (!pinRecord || !pinRecord.hasSetPin) {
+		throw new Error("No PIN set. Please set a transaction PIN first.");
+	}
+
+	if (
+		pinRecord.isLocked &&
+		pinRecord.lockedUntil &&
+		new Date() < pinRecord.lockedUntil
+	) {
+		const remainingMinutes = Math.ceil(
+			(pinRecord.lockedUntil - new Date()) / (60 * 1000),
+		);
+		throw new Error(`PIN is locked. Try again in ${remainingMinutes} minutes.`);
+	}
+
+	const isValid = await bcrypt.compare(pin, pinRecord.pinHash);
+
+	if (!isValid) {
+		pinRecord.failedAttempts += 1;
+		pinRecord.lastFailedAttempt = new Date();
+
+		if (pinRecord.failedAttempts >= 5) {
+			pinRecord.isLocked = true;
+			pinRecord.lockedUntil = new Date(Date.now() + 30 * 60 * 1000);
+			await pinRecord.save();
+			throw new Error("Too many failed attempts. PIN locked for 30 minutes.");
+		}
+
+		await pinRecord.save();
+		throw new Error(
+			`Invalid PIN. ${5 - pinRecord.failedAttempts} attempts remaining.`,
+		);
+	}
+
+	// Reset failed attempts on success
+	pinRecord.failedAttempts = 0;
+	pinRecord.lastFailedAttempt = null;
+	pinRecord.isLocked = false;
+	pinRecord.lockedUntil = null;
+	await pinRecord.save();
+
+	return true;
+};
 
 // ==================== WALLET CREATION ====================
 
@@ -842,8 +899,14 @@ export const verifyTopup = async (req, res) => {
 export const sendToKuditrakUser = async (req, res) => {
 	try {
 		const senderId = req.user._id;
-		const { recipientEmail, recipientPhone, recipientHandle, amount, note } =
-			req.body;
+		const {
+			recipientEmail,
+			recipientPhone,
+			recipientHandle,
+			amount,
+			note,
+			pin,
+		} = req.body;
 
 		console.log("🔵 Send to Kuditrak user:", {
 			senderId,
@@ -852,6 +915,7 @@ export const sendToKuditrakUser = async (req, res) => {
 			recipientHandle,
 			amount,
 			note,
+			hasPin: !!pin,
 		});
 
 		// Validate amount
@@ -871,6 +935,17 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
+		// ✅ VERIFY PIN
+		try {
+			await verifyPin(senderId, pin);
+		} catch (pinError) {
+			return res.status(400).json({
+				success: false,
+				error: pinError.message,
+				requiresPin: pinError.message.includes("No PIN set"),
+			});
+		}
+
 		// Find recipient by email, phone, or handle
 		let recipient;
 		if (recipientEmail) {
@@ -878,7 +953,6 @@ export const sendToKuditrakUser = async (req, res) => {
 		} else if (recipientPhone) {
 			recipient = await User.findOne({ phoneNumber: recipientPhone });
 		} else if (recipientHandle) {
-			// If handle is like "@username", extract username
 			const cleanHandle = recipientHandle.startsWith("@")
 				? recipientHandle.substring(1)
 				: recipientHandle;
@@ -898,7 +972,6 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
-		// Check if sender is trying to send to themselves
 		if (recipient._id.toString() === senderId.toString()) {
 			return res.status(400).json({
 				success: false,
@@ -928,11 +1001,9 @@ export const sendToKuditrakUser = async (req, res) => {
 			walletType: "main",
 		});
 
-		// If recipient doesn't have a wallet, create one
 		if (!recipientWallet) {
 			console.log("🔄 Creating wallet for recipient:", recipient._id);
 
-			// Ensure recipient has Anchor customer
 			const customerResult = await getOrCreateAnchorCustomer(recipient._id);
 			if (!customerResult.success) {
 				return res.status(400).json({
@@ -955,7 +1026,6 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
-		// Check sender's balance
 		if (senderWallet.balance < amount) {
 			return res.status(400).json({
 				success: false,
@@ -966,23 +1036,18 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
-		// Generate reference
 		const reference = `SEND_${Date.now()}_${senderId.toString().slice(-6)}`;
 
-		// Perform the transfer (atomic operation)
 		const session = await mongoose.startSession();
 		session.startTransaction();
 
 		try {
-			// Deduct from sender
 			senderWallet.balance -= amount;
 			await senderWallet.save({ session });
 
-			// Add to recipient
 			recipientWallet.balance += amount;
 			await recipientWallet.save({ session });
 
-			// Create sender transaction (debit)
 			const senderTransaction = await AnchorTransaction.create(
 				[
 					{
@@ -1007,13 +1072,13 @@ export const sendToKuditrakUser = async (req, res) => {
 							note: note || "",
 							isKuditrakTransfer: true,
 							timestamp: new Date().toISOString(),
+							pinVerified: true,
 						},
 					},
 				],
 				{ session },
 			);
 
-			// Create recipient transaction (credit)
 			const recipientTransaction = await AnchorTransaction.create(
 				[
 					{
@@ -1045,7 +1110,6 @@ export const sendToKuditrakUser = async (req, res) => {
 
 			await session.commitTransaction();
 
-			// Send notifications
 			await sendPushToUser(
 				senderId,
 				"💸 Money Sent",
@@ -1130,6 +1194,7 @@ export const withdrawToBank = async (req, res) => {
 			amount,
 			note,
 			saveAsBeneficiary = false,
+			pin,
 		} = req.body;
 
 		console.log("🔵 Withdraw to bank:", {
@@ -1141,6 +1206,7 @@ export const withdrawToBank = async (req, res) => {
 			amount,
 			note,
 			saveAsBeneficiary,
+			hasPin: !!pin,
 		});
 
 		// Validate required fields
@@ -1164,7 +1230,6 @@ export const withdrawToBank = async (req, res) => {
 			});
 		}
 
-		// Validate minimum amount
 		if (amount < 100) {
 			return res.status(400).json({
 				success: false,
@@ -1173,7 +1238,17 @@ export const withdrawToBank = async (req, res) => {
 			});
 		}
 
-		// Get user's wallet
+		// ✅ VERIFY PIN
+		try {
+			await verifyPin(userId, pin);
+		} catch (pinError) {
+			return res.status(400).json({
+				success: false,
+				error: pinError.message,
+				requiresPin: pinError.message.includes("No PIN set"),
+			});
+		}
+
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -1188,7 +1263,6 @@ export const withdrawToBank = async (req, res) => {
 			});
 		}
 
-		// Check balance
 		if (wallet.balance < amount) {
 			return res.status(400).json({
 				success: false,
@@ -1199,9 +1273,8 @@ export const withdrawToBank = async (req, res) => {
 			});
 		}
 
-		// Verify account with Paystack (real-time verification)
+		// Verify account with Paystack
 		const paystackSecretKey = process.env.PAYSTACK_SECRET;
-
 		if (paystackSecretKey) {
 			try {
 				const verifyResponse = await fetch(
@@ -1213,37 +1286,20 @@ export const withdrawToBank = async (req, res) => {
 					},
 				);
 				const verifyData = await verifyResponse.json();
-
 				if (verifyData.status && verifyData.data) {
-					// Use the verified account name
-					const verifiedAccountName = verifyData.data.account_name;
-					console.log(`✅ Account verified: ${verifiedAccountName}`);
-
-					// If account name doesn't match, warn but don't block
-					if (accountName && accountName !== verifiedAccountName) {
-						console.warn(
-							`⚠️ Account name mismatch: Provided "${accountName}", Verified "${verifiedAccountName}"`,
-						);
-					}
+					console.log(`✅ Account verified: ${verifyData.data.account_name}`);
 				}
 			} catch (verifyError) {
-				console.warn(
-					"⚠️ Could not verify account during withdrawal:",
-					verifyError.message,
-				);
-				// Continue with withdrawal even if verification fails (user already verified earlier)
+				console.warn("⚠️ Could not verify account:", verifyError.message);
 			}
 		}
 
-		// Generate reference
 		const reference = `WITHDRAW_${Date.now()}_${userId.toString().slice(-6)}`;
 		const isSandbox = process.env.NODE_ENV !== "production";
 
-		// Deduct from wallet
 		wallet.balance -= amount;
 		await wallet.save();
 
-		// Create transaction record
 		const transaction = await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: wallet.anchorCustomerId,
@@ -1268,10 +1324,10 @@ export const withdrawToBank = async (req, res) => {
 				isSandbox,
 				saveAsBeneficiary,
 				timestamp: new Date().toISOString(),
+				pinVerified: true,
 			},
 		});
 
-		// Save beneficiary if requested
 		if (saveAsBeneficiary) {
 			try {
 				const Beneficiary = await import("../models/Beneficiary.js").then(
@@ -1294,7 +1350,6 @@ export const withdrawToBank = async (req, res) => {
 			}
 		}
 
-		// Send notification
 		await sendPushToUser(
 			userId,
 			"💸 Withdrawal Successful",
