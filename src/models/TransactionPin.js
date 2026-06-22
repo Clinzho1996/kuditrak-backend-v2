@@ -1,5 +1,5 @@
 // backend/models/TransactionPin.js
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import mongoose from "mongoose";
 
 const transactionPinSchema = new mongoose.Schema({
