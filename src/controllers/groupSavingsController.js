@@ -110,13 +110,24 @@ const allMembersFullyPaid = async (groupId, cycle, contributionAmount) => {
 	return allPaid;
 };
 
-/**
- * Process payout for a group
- */
-const processPayout = async (groupId) => {
+const processPayout = async (groupId, force = false) => {
 	try {
 		const group = await GroupSavings.findById(groupId);
 		if (!group) return;
+
+		// ✅ Check if payout for this cycle has already been processed
+		const existingPayout = await GroupPayout.findOne({
+			groupId: group._id,
+			cycle: group.currentCycle,
+			status: "completed",
+		});
+
+		if (existingPayout) {
+			console.log(
+				`⚠️ Payout for cycle ${group.currentCycle} already processed. Skipping.`,
+			);
+			return { alreadyProcessed: true, payout: existingPayout };
+		}
 
 		// Check if all members have fully paid for this cycle
 		const allPaid = await allMembersFullyPaid(
@@ -128,12 +139,13 @@ const processPayout = async (groupId) => {
 			console.log(
 				`⚠️ Not all members have fully paid for cycle ${group.currentCycle}`,
 			);
-			return;
+			return { alreadyProcessed: false, allPaid: false };
 		}
 
 		let payoutMemberId = null;
 
 		if (group.payoutOrder === "sequential") {
+			// Check if any member has already received payout this cycle
 			const paidMembers = await GroupPayout.find({
 				groupId: group._id,
 				cycle: group.currentCycle,
@@ -169,7 +181,7 @@ const processPayout = async (groupId) => {
 
 		if (!payoutMemberId) {
 			console.log("No eligible member for payout this cycle");
-			return;
+			return { alreadyProcessed: false, allPaid: true, noEligibleMember: true };
 		}
 
 		const subAccount = await AnchorSubAccount.findOne({
@@ -179,7 +191,7 @@ const processPayout = async (groupId) => {
 
 		if (!subAccount || subAccount.balance === 0) {
 			console.log("No funds in group account");
-			return;
+			return { alreadyProcessed: false, allPaid: true, noFunds: true };
 		}
 
 		const payoutAmount = group.contributionAmount * group.memberCount;
@@ -188,7 +200,11 @@ const processPayout = async (groupId) => {
 			console.log(
 				`Insufficient funds: ${subAccount.balance} < ${payoutAmount}`,
 			);
-			return;
+			return {
+				alreadyProcessed: false,
+				allPaid: true,
+				insufficientFunds: true,
+			};
 		}
 
 		const recipientWallet = await AnchorWallet.findOne({
@@ -198,7 +214,7 @@ const processPayout = async (groupId) => {
 
 		if (!recipientWallet) {
 			console.log("Recipient wallet not found");
-			return;
+			return { alreadyProcessed: false, allPaid: true, walletNotFound: true };
 		}
 
 		// Transfer from sub-account to recipient wallet
@@ -252,7 +268,7 @@ const processPayout = async (groupId) => {
 			});
 		}
 
-		// ✅ Mark all members for next cycle
+		// Mark all members for next cycle
 		await GroupMember.updateMany(
 			{ groupId: group._id, status: "active" },
 			{
@@ -267,7 +283,7 @@ const processPayout = async (groupId) => {
 			},
 		);
 
-		// ✅ Advance to next cycle
+		// Advance to next cycle
 		group.currentCycle += 1;
 		group.totalContributions = 0;
 		await group.save();
@@ -308,62 +324,13 @@ const processPayout = async (groupId) => {
 		console.log(
 			`✅ Payout completed: ₦${payoutAmount} to user ${payoutMemberId}`,
 		);
+
+		return { alreadyProcessed: false, success: true, payout };
 	} catch (err) {
 		console.error("Process payout error:", err);
+		return { error: err.message };
 	}
 };
-
-const getOrCreateGroupSubAccount = async (userId, group) => {
-	let subAccount = await AnchorSubAccount.findOne({
-		userId,
-		subAccountId: group.subAccountId || `group_${group._id}`,
-	});
-
-	if (!subAccount) {
-		const wallet = await AnchorWallet.findOne({
-			userId,
-			walletType: "main",
-		});
-
-		if (!wallet) {
-			throw new Error("Wallet not found");
-		}
-
-		subAccount = await AnchorSubAccount.create({
-			userId,
-			parentWalletId: wallet._id,
-			subAccountId: `group_${group._id}_${Date.now().toString().slice(-6)}`,
-			name: group.name,
-			type: "savings",
-			balance: 0,
-			targetAmount: null,
-			autoSave: {
-				enabled: false,
-				amount: 0,
-				frequency: "monthly",
-				dayOfMonth: 1,
-			},
-			lockSettings: {
-				enabled: false,
-				unlockDate: null,
-				lockedAt: null,
-			},
-			icon: group.icon || "👥",
-			color: group.color || "#4F46E5",
-			metadata: {
-				groupId: group._id,
-				type: "group_savings",
-				memberCount: group.memberCount || 0,
-			},
-		});
-
-		group.subAccountId = subAccount.subAccountId;
-		await group.save();
-	}
-
-	return subAccount;
-};
-
 // ==================== GROUP MANAGEMENT ====================
 
 export const createGroup = async (req, res) => {
@@ -1301,26 +1268,51 @@ export const contributeToGroup = async (req, res) => {
 		);
 
 		if (allPaid) {
-			console.log("🎉 All members fully paid! Processing payout...");
-			await processPayout(group._id);
-
-			// Send notification to all members
-			const allMembers = await GroupMember.find({
+			// ✅ CHECK IF PAYOUT ALREADY EXISTS FOR THIS CYCLE
+			const existingPayout = await GroupPayout.findOne({
 				groupId: group._id,
-				status: "active",
+				cycle: group.currentCycle,
+				status: "completed",
 			});
 
-			for (const m of allMembers) {
+			if (existingPayout) {
+				console.log(
+					`⚠️ Payout for cycle ${group.currentCycle} already processed. Not processing again.`,
+				);
+
+				// Send notification to the user who just contributed
 				await sendPushToUser(
-					m.userId,
-					"🎉 All Members Paid!",
-					`All members have fully paid for cycle ${group.currentCycle}. Payout is being processed!`,
+					userId,
+					"ℹ️ Payout Already Processed",
+					`Payout for cycle ${group.currentCycle} has already been processed. Your contribution has been recorded for the next cycle.`,
 					{
-						type: "group_cycle_complete",
+						type: "payout_already_processed",
 						groupId: group._id,
 						cycle: group.currentCycle,
 					},
 				);
+			} else {
+				console.log("🎉 All members fully paid! Processing payout...");
+				await processPayout(group._id);
+
+				// Send notification to all members
+				const allMembers = await GroupMember.find({
+					groupId: group._id,
+					status: "active",
+				});
+
+				for (const m of allMembers) {
+					await sendPushToUser(
+						m.userId,
+						"🎉 All Members Paid!",
+						`All members have fully paid for cycle ${group.currentCycle}. Payout is being processed!`,
+						{
+							type: "group_cycle_complete",
+							groupId: group._id,
+							cycle: group.currentCycle,
+						},
+					);
+				}
 			}
 		} else {
 			// Send notification based on payment status
@@ -1359,6 +1351,7 @@ export const contributeToGroup = async (req, res) => {
 				isFullyPaid: isFullyPaid,
 				totalPaidThisCycle: newTotalPaid,
 				remainingAmount: Math.max(0, amountDue - newTotalPaid),
+				payoutAlreadyProcessed: allPaid ? !!existingPayout : false,
 			},
 		});
 	} catch (err) {
@@ -1484,12 +1477,36 @@ export const processPayoutManually = async (req, res) => {
 			return res.status(403).json({ error: "Only admins can process payouts" });
 		}
 
+		// ✅ Check if payout for this cycle has already been processed
+		const existingPayout = await GroupPayout.findOne({
+			groupId: group._id,
+			cycle: group.currentCycle,
+			status: "completed",
+		});
+
+		if (existingPayout) {
+			console.log(
+				`⚠️ Payout for cycle ${group.currentCycle} already processed. Blocking manual payout.`,
+			);
+			return res.status(400).json({
+				success: false,
+				error: `Payout for cycle ${group.currentCycle} has already been processed on ${new Date(existingPayout.paidAt).toLocaleString()}.`,
+				existingPayout: {
+					id: existingPayout._id,
+					amount: existingPayout.amount,
+					paidAt: existingPayout.paidAt,
+					recipient: existingPayout.memberId,
+				},
+			});
+		}
+
 		// ✅ Check if all members have fully paid
 		const allPaid = await allMembersFullyPaid(
 			groupId,
 			group.currentCycle,
 			group.contributionAmount,
 		);
+
 		if (!allPaid) {
 			const members = await GroupMember.find({
 				groupId: group._id,
@@ -1503,6 +1520,7 @@ export const processPayoutManually = async (req, res) => {
 			});
 
 			return res.status(400).json({
+				success: false,
 				error: `Not all members have fully paid for cycle ${group.currentCycle}. ${unpaidMembers.length} member(s) still need to complete their contributions.`,
 				unpaidMembers: unpaidMembers.map((m) => ({
 					name: m.userId?.fullName || "Unknown",
@@ -1515,15 +1533,52 @@ export const processPayoutManually = async (req, res) => {
 			});
 		}
 
-		await processPayout(groupId);
+		// ✅ Process payout with duplicate check (extra safety)
+		const result = await processPayout(groupId);
+
+		// ✅ Check if payout was already processed (shouldn't happen since we checked above, but just in case)
+		if (result?.alreadyProcessed) {
+			return res.status(400).json({
+				success: false,
+				error: `Payout for cycle ${group.currentCycle} was already processed during the operation.`,
+				existingPayout: result.payout,
+			});
+		}
+
+		if (result?.error) {
+			return res.status(500).json({
+				success: false,
+				error: result.error,
+			});
+		}
+
+		// Send notification to admin confirming manual payout
+		await sendPushToUser(
+			req.user._id,
+			"✅ Payout Processed Successfully",
+			`You successfully processed the payout for cycle ${group.currentCycle} of "${group.name}".`,
+			{
+				type: "payout_manual_success",
+				groupId: group._id,
+				cycle: group.currentCycle,
+			},
+		);
 
 		res.status(200).json({
 			success: true,
-			message: "Payout processed successfully",
+			message: `Payout for cycle ${group.currentCycle} processed successfully`,
+			data: {
+				cycle: group.currentCycle,
+				amount: group.contributionAmount * group.memberCount,
+				membersCount: group.memberCount,
+			},
 		});
 	} catch (err) {
 		console.error("Process payout manually error:", err);
-		res.status(500).json({ error: err.message });
+		res.status(500).json({
+			success: false,
+			error: err.message,
+		});
 	}
 };
 
