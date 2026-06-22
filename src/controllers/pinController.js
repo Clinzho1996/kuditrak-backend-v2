@@ -1,5 +1,5 @@
 // backend/controllers/pinController.js
-import bcrypt from "bcryptjs";
+import bcrypt from "bcrypt";
 import TransactionPin from "../models/TransactionPin.js";
 import { sendPushToUser } from "../services/pushService.js";
 
