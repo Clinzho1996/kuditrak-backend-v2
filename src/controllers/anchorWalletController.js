@@ -1,4 +1,5 @@
 // backend/controllers/anchorWalletController.js
+import bcrypt from "bcrypt";
 import mongoose from "mongoose";
 import AnchorCustomer from "../models/AnchorCustomer.js";
 import AnchorSubAccount from "../models/AnchorSubAccount.js";
@@ -10,12 +11,6 @@ import User from "../models/User.js";
 import { getOrCreateAnchorCustomer } from "../services/anchorCustomerService.js";
 import anchorService from "../services/anchorService.js";
 import { sendPushToUser } from "../services/pushService.js";
-
-// ==================== PIN VERIFICATION MIDDLEWARE ====================
-
-// backend/controllers/anchorWalletController.js - Updated with better error handling
-
-import bcrypt from "bcrypt";
 
 // ==================== PIN VERIFICATION ====================
 
@@ -71,7 +66,7 @@ const verifyPin = async (userId, pin) => {
 	return true;
 };
 
-// ==================== SEND TO KUDITRAK USER ====================
+// backend/controllers/anchorWalletController.js - Add detailed error logging
 
 /**
  * Send money to another Kuditrak user (internal wallet transfer)
@@ -108,15 +103,6 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
-		if (amount < 1) {
-			console.log("❌ Amount too small:", amount);
-			return res.status(400).json({
-				success: false,
-				error: "Minimum amount is ₦1",
-				message: "Please enter a valid amount",
-			});
-		}
-
 		// ✅ VERIFY PIN
 		try {
 			await verifyPin(senderId, pin);
@@ -130,19 +116,16 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
-		// Find recipient by email, phone, or handle
+		// Find recipient
 		let recipient;
 		if (recipientEmail) {
-			console.log("🔍 Searching for recipient by email:", recipientEmail);
 			recipient = await User.findOne({ email: recipientEmail });
 		} else if (recipientPhone) {
-			console.log("🔍 Searching for recipient by phone:", recipientPhone);
 			recipient = await User.findOne({ phoneNumber: recipientPhone });
 		} else if (recipientHandle) {
 			const cleanHandle = recipientHandle.startsWith("@")
 				? recipientHandle.substring(1)
 				: recipientHandle;
-			console.log("🔍 Searching for recipient by handle:", cleanHandle);
 			recipient = await User.findOne({
 				$or: [
 					{ fullName: { $regex: cleanHandle, $options: "i" } },
@@ -160,18 +143,14 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
-		console.log("✅ Recipient found:", {
-			id: recipient._id.toString(),
-			name: recipient.fullName,
-			email: recipient.email,
-		});
+		console.log("✅ Recipient found:", recipient._id.toString());
 
-		// Check if sender is trying to send to themselves
+		// Check self transfer
 		if (recipient._id.toString() === senderId.toString()) {
-			console.log("❌ Sender trying to send to themselves");
+			console.log("❌ Self transfer attempted");
 			return res.status(400).json({
 				success: false,
-				error: "Invalid recipient",
+				error: "Cannot send to yourself",
 				message: "You cannot send money to yourself",
 			});
 		}
@@ -186,15 +165,15 @@ export const sendToKuditrakUser = async (req, res) => {
 			console.log("❌ Sender wallet not found");
 			return res.status(404).json({
 				success: false,
-				error: "Sender wallet not found",
+				error: "Wallet not found",
 				message: "Please create a wallet first",
 				requiresWalletCreation: true,
 			});
 		}
 
-		console.log(`💰 Sender wallet balance: ${senderWallet.balance}`);
+		console.log(`💰 Sender balance: ${senderWallet.balance}`);
 
-		// Check sender's balance
+		// Check balance
 		if (senderWallet.balance < amount) {
 			console.log(
 				`❌ Insufficient balance: ${senderWallet.balance} < ${amount}`,
@@ -204,30 +183,25 @@ export const sendToKuditrakUser = async (req, res) => {
 				error: "Insufficient balance",
 				available: senderWallet.balance,
 				requested: amount,
-				message: `Your balance (₦${senderWallet.balance.toLocaleString()}) is insufficient for this transfer`,
+				message: `Insufficient balance. Available: ₦${senderWallet.balance.toLocaleString()}`,
 			});
 		}
 
-		// Get recipient's wallet
+		// Get or create recipient wallet
 		let recipientWallet = await AnchorWallet.findOne({
 			userId: recipient._id,
 			walletType: "main",
 		});
 
-		// If recipient doesn't have a wallet, create one
 		if (!recipientWallet) {
-			console.log("🔄 Creating wallet for recipient:", recipient._id);
-
+			console.log("🔄 Creating wallet for recipient");
 			try {
 				const customerResult = await getOrCreateAnchorCustomer(recipient._id);
 				if (!customerResult.success) {
-					console.log(
-						"❌ Failed to create recipient customer:",
-						customerResult.error,
-					);
+					console.log("❌ Failed to create recipient customer");
 					return res.status(400).json({
 						success: false,
-						error: "Could not create recipient wallet",
+						error: "Recipient account setup failed",
 						message: "Recipient account is not fully set up",
 					});
 				}
@@ -246,10 +220,10 @@ export const sendToKuditrakUser = async (req, res) => {
 				console.log("✅ Recipient wallet created");
 			} catch (walletError) {
 				console.error("❌ Error creating recipient wallet:", walletError);
-				return res.status(400).json({
+				return res.status(500).json({
 					success: false,
-					error: "Could not create recipient wallet",
-					message: "Failed to set up recipient account",
+					error: "Failed to create recipient wallet",
+					message: "Could not set up recipient account",
 				});
 			}
 		}
@@ -258,7 +232,7 @@ export const sendToKuditrakUser = async (req, res) => {
 		const reference = `SEND_${Date.now()}_${senderId.toString().slice(-6)}`;
 		console.log("📝 Transaction reference:", reference);
 
-		// Perform the transfer (atomic operation)
+		// Perform transfer
 		const session = await mongoose.startSession();
 		session.startTransaction();
 
@@ -266,18 +240,14 @@ export const sendToKuditrakUser = async (req, res) => {
 			// Deduct from sender
 			senderWallet.balance -= amount;
 			await senderWallet.save({ session });
-			console.log(
-				`✅ Deducted ${amount} from sender, new balance: ${senderWallet.balance}`,
-			);
+			console.log(`✅ Deducted ${amount} from sender`);
 
 			// Add to recipient
 			recipientWallet.balance += amount;
 			await recipientWallet.save({ session });
-			console.log(
-				`✅ Added ${amount} to recipient, new balance: ${recipientWallet.balance}`,
-			);
+			console.log(`✅ Added ${amount} to recipient`);
 
-			// Create sender transaction (debit)
+			// Create transactions
 			const senderTransaction = await AnchorTransaction.create(
 				[
 					{
@@ -289,16 +259,13 @@ export const sendToKuditrakUser = async (req, res) => {
 						type: "debit",
 						category: "transfer",
 						status: "success",
-						description: note
-							? `Sent to ${recipient.fullName}${note ? ` - ${note}` : ""}`
-							: `Sent to ${recipient.fullName}`,
+						description: `Sent to ${recipient.fullName}`,
 						source: "wallet",
 						destination: "wallet",
 						metadata: {
 							reference,
 							recipientId: recipient._id,
 							recipientName: recipient.fullName,
-							recipientEmail: recipient.email,
 							note: note || "",
 							isKuditrakTransfer: true,
 							timestamp: new Date().toISOString(),
@@ -309,7 +276,6 @@ export const sendToKuditrakUser = async (req, res) => {
 				{ session },
 			);
 
-			// Create recipient transaction (credit)
 			const recipientTransaction = await AnchorTransaction.create(
 				[
 					{
@@ -321,9 +287,7 @@ export const sendToKuditrakUser = async (req, res) => {
 						type: "credit",
 						category: "transfer",
 						status: "success",
-						description: note
-							? `Received from ${req.user.fullName}${note ? ` - ${note}` : ""}`
-							: `Received from ${req.user.fullName}`,
+						description: `Received from ${req.user.fullName}`,
 						source: "wallet",
 						destination: "wallet",
 						metadata: {
@@ -340,20 +304,17 @@ export const sendToKuditrakUser = async (req, res) => {
 			);
 
 			await session.commitTransaction();
-			console.log("✅ Transaction committed successfully");
+			console.log("✅ Transaction committed");
 
 			// Send notifications
 			await sendPushToUser(
 				senderId,
 				"💸 Money Sent",
-				`You sent ₦${amount.toLocaleString()} to ${recipient.fullName}${
-					note ? ` (${note})` : ""
-				}`,
+				`You sent ₦${amount.toLocaleString()} to ${recipient.fullName}`,
 				{
 					type: "money_sent",
 					amount,
 					recipientId: recipient._id,
-					recipientName: recipient.fullName,
 					reference,
 					newBalance: senderWallet.balance,
 				},
@@ -362,9 +323,7 @@ export const sendToKuditrakUser = async (req, res) => {
 			await sendPushToUser(
 				recipient._id,
 				"💰 Money Received",
-				`You received ₦${amount.toLocaleString()} from ${req.user.fullName}${
-					note ? ` (${note})` : ""
-				}`,
+				`You received ₦${amount.toLocaleString()} from ${req.user.fullName}`,
 				{
 					type: "money_received",
 					amount,
@@ -406,12 +365,10 @@ export const sendToKuditrakUser = async (req, res) => {
 			name: error.name,
 		});
 
-		// Send a detailed error response
 		res.status(500).json({
 			success: false,
 			error: error.message || "Failed to send money",
-			message:
-				error.message || "An unexpected error occurred while sending money",
+			message: error.message || "An unexpected error occurred",
 		});
 	}
 };
