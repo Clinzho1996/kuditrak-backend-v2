@@ -1309,15 +1309,17 @@ export const fundNGNCard = async (req, res) => {
 	}
 };
 
-// backend/controllers/bridgecardCardController.js - Updated unload functions
+// backend/controllers/bridgecardCardController.js - Fixed unload functions with proper cent conversion
 
 /**
- * Unload USD Card - Updated to credit user's wallet
+ * Unload USD Card - Fixed with proper cent conversion
  */
 export const unloadUSDCard = async (req, res) => {
 	try {
 		const userId = req.user._id;
 		const { cardId, amount, transactionReference = null } = req.body;
+
+		console.log("🔵 Unloading USD card:", { userId, cardId, amount });
 
 		if (!amount || amount <= 0) {
 			return res.status(400).json({ error: "Valid amount required" });
@@ -1328,16 +1330,33 @@ export const unloadUSDCard = async (req, res) => {
 			return res.status(404).json({ error: "Card not found" });
 		}
 
-		// Check if enough balance on card
+		// ✅ Bridgecard API uses cents for USD (e.g., 216 = $2.16)
+		// Convert the amount from dollars to cents
+		const amountInCents = Math.round(amount * 100);
+		console.log(`💰 Converting $${amount} to ${amountInCents} cents`);
+
+		// Check if enough balance on card - Bridgecard returns balance in cents
 		const balance = await bridgecardService.getCardBalance(card.cardId);
-		if (!balance.success || balance.availableBalance < amount) {
-			return res.status(400).json({ error: "Insufficient balance on card" });
+		console.log("📊 Card balance response:", balance);
+
+		if (!balance.success) {
+			return res.status(400).json({ error: "Failed to check card balance" });
 		}
 
-		// Unload from Bridgecard
+		// Balance is returned in cents, convert to dollars for comparison
+		const balanceInDollars = balance.availableBalance / 100;
+		console.log(`📊 Card balance: $${balanceInDollars}, requested: $${amount}`);
+
+		if (balanceInDollars < amount) {
+			return res.status(400).json({
+				error: `Insufficient balance on card. Available: $${balanceInDollars.toFixed(2)}, Requested: $${amount}`,
+			});
+		}
+
+		// ✅ Unload from Bridgecard - amount should be in cents
 		const result = await bridgecardService.unloadCard(
 			card.cardId,
-			amount,
+			amountInCents, // Send cents
 			"USD",
 			transactionReference,
 		);
@@ -1349,8 +1368,9 @@ export const unloadUSDCard = async (req, res) => {
 			});
 		}
 
-		// ✅ CREDIT THE USER'S WALLET
-		// Find the user's main wallet
+		console.log("✅ Card unloaded successfully:", result);
+
+		// ✅ CREDIT THE USER'S WALLET - amount should be in NGN
 		const AnchorWallet = await import("../models/AnchorWallet.js").then(
 			(m) => m.default,
 		);
@@ -1367,16 +1387,13 @@ export const unloadUSDCard = async (req, res) => {
 			});
 		}
 
-		// Convert USD to NGN if needed (using a fixed rate or API)
-		// For now, we'll assume the amount is already in the correct currency
-		let ngnAmount = amount;
+		// Convert USD to NGN (use a real exchange rate in production)
+		const usdToNgnRate = 1500; // Example rate - should come from an API
+		const ngnAmount = amount * usdToNgnRate;
 
-		// If card is USD, convert to NGN (simplified conversion)
-		if (card.currency === "USD") {
-			// Use a reasonable exchange rate (you should use a real API in production)
-			const usdToNgnRate = 1500; // Example rate
-			ngnAmount = amount * usdToNgnRate;
-		}
+		console.log(
+			`💰 Converting $${amount} to ₦${ngnAmount} at rate ${usdToNgnRate}`,
+		);
 
 		// Credit the wallet
 		wallet.balance += ngnAmount;
@@ -1403,26 +1420,30 @@ export const unloadUSDCard = async (req, res) => {
 				cardId: card.cardId,
 				cardLast4: card.last4,
 				originalAmount: amount,
-				originalCurrency: card.currency,
+				originalCurrency: "USD",
+				originalAmountCents: amountInCents,
+				exchangeRate: usdToNgnRate,
 				isCardUnload: true,
 				timestamp: new Date().toISOString(),
 			},
 		});
 
-		// Update card balance in local DB
+		// Update card balance in local DB (store in dollars)
 		const currentCardBalance = card.balance || 0;
 		card.balance = Math.max(0, currentCardBalance - amount);
 		await card.save();
 
+		// Send notification with correct amounts
 		await sendPushToUser(
 			userId,
 			"💸 Card Unloaded",
-			`${card.currency === "USD" ? "$" : "₦"}${amount} has been withdrawn from ${card.metaData?.cardName || "your card"} ending in ${card.last4}.`,
+			`$${amount.toFixed(2)} (₦${ngnAmount.toFixed(2)}) has been withdrawn from ${card.metaData?.cardName || "your card"} ending in ${card.last4}.`,
 			{
 				type: "card_unloaded",
 				cardId: card.cardId,
-				amount,
-				currency: card.currency,
+				amount: amount.toFixed(2),
+				currency: "USD",
+				ngnAmount: ngnAmount.toFixed(2),
 				newBalance: wallet.balance,
 			},
 		);
@@ -1434,22 +1455,26 @@ export const unloadUSDCard = async (req, res) => {
 			data: {
 				...result.data,
 				walletNewBalance: wallet.balance,
+				amountInUSD: amount,
 				amountInNGN: ngnAmount,
+				amountInCents: amountInCents,
 			},
 		});
 	} catch (error) {
-		console.error("Unload card error:", error);
+		console.error("❌ Unload USD card error:", error);
 		res.status(500).json({ error: error.message });
 	}
 };
 
 /**
- * Unload NGN Card - Updated to credit user's wallet
+ * Unload NGN Card - Fixed with proper amount handling
  */
 export const unloadNGNCard = async (req, res) => {
 	try {
 		const userId = req.user._id;
 		const { cardId, amount, transactionReference = null } = req.body;
+
+		console.log("🔵 Unloading NGN card:", { userId, cardId, amount });
 
 		if (!amount || amount <= 0) {
 			return res.status(400).json({
@@ -1466,18 +1491,40 @@ export const unloadNGNCard = async (req, res) => {
 			});
 		}
 
+		// ✅ For NGN, Bridgecard may also use smallest unit (kobo)
+		// Check if we need to convert to kobo (100 kobo = 1 NGN)
+		const amountInKobo = Math.round(amount * 100);
+		console.log(`💰 Converting ₦${amount} to ${amountInKobo} kobo`);
+
 		// Check if enough balance on card
 		const balance = await bridgecardService.getNGNCardBalance(
 			card.cardholderId,
 		);
-		if (!balance.success || balance.balance < amount) {
-			return res.status(400).json({ error: "Insufficient balance on card" });
+		console.log("📊 NGN card balance response:", balance);
+
+		if (!balance.success) {
+			return res.status(400).json({ error: "Failed to check card balance" });
 		}
 
-		// Unload from Bridgecard
+		// Balance might be in kobo or NGN - check the value
+		let balanceInNGN = balance.balance;
+		if (balance.balance > 1000) {
+			// Likely in kobo
+			balanceInNGN = balance.balance / 100;
+		}
+
+		console.log(`📊 Card balance: ₦${balanceInNGN}, requested: ₦${amount}`);
+
+		if (balanceInNGN < amount) {
+			return res.status(400).json({
+				error: `Insufficient balance on card. Available: ₦${balanceInNGN.toFixed(2)}, Requested: ₦${amount}`,
+			});
+		}
+
+		// ✅ Unload from Bridgecard - use the service function
 		const result = await bridgecardService.unloadNGNCard(
 			card.cardId,
-			amount,
+			amount, // The service should handle the conversion
 			transactionReference,
 		);
 
@@ -1487,6 +1534,8 @@ export const unloadNGNCard = async (req, res) => {
 				error: result.error,
 			});
 		}
+
+		console.log("✅ NGN card unloaded successfully:", result);
 
 		// ✅ CREDIT THE USER'S WALLET
 		const AnchorWallet = await import("../models/AnchorWallet.js").then(
@@ -1542,11 +1591,11 @@ export const unloadNGNCard = async (req, res) => {
 		await sendPushToUser(
 			userId,
 			"💸 NGN Card Unloaded",
-			`₦${amount} has been withdrawn from ${card.metaData?.cardName || "your card"} ending in ${card.last4}.`,
+			`₦${amount.toFixed(2)} has been withdrawn from ${card.metaData?.cardName || "your card"} ending in ${card.last4}.`,
 			{
 				type: "ngn_card_unloaded",
 				cardId: card.cardId,
-				amount,
+				amount: amount.toFixed(2),
 				newBalance: wallet.balance,
 			},
 		);
@@ -1561,7 +1610,7 @@ export const unloadNGNCard = async (req, res) => {
 			},
 		});
 	} catch (error) {
-		console.error("Unload NGN card error:", error);
+		console.error("❌ Unload NGN card error:", error);
 		res.status(500).json({ error: error.message });
 	}
 };
