@@ -3,6 +3,7 @@ import {
 	createTransaction,
 	deleteTransaction,
 	getAllBankTransactions,
+	getAllTransactions,
 	getBudgetTransactions,
 	getLinkedTransactions,
 	getTransactionById,
@@ -24,6 +25,7 @@ router.use(protect);
 
 // Basic CRUD operations
 router.get("/", listTransactions);
+router.get("/", getAllTransactions);
 router.post("/create", createTransaction);
 router.get("/history", getTransactionHistory);
 router.get("/:id", getTransactionById);
