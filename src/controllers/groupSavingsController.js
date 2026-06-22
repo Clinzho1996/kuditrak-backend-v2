@@ -1119,12 +1119,13 @@ export const contributeToGroup = async (req, res) => {
 
 		console.log("👤 Member found:", member._id);
 
-		// ✅ Check if user has already fully paid for this cycle
+		// ✅ Check current payment status
 		const currentPaid = member.cycleStatus?.amountPaid || 0;
 		const amountDue = member.cycleStatus?.amountDue || group.contributionAmount;
 		const remainingAmount = amountDue - currentPaid;
 
-		if (remainingAmount <= 0) {
+		// ✅ Check if already fully paid
+		if (currentPaid >= amountDue) {
 			return res.status(400).json({
 				error: `You have already fully paid ₦${currentPaid.toLocaleString()} for this cycle. Wait for the next cycle.`,
 				alreadyPaid: true,
@@ -1220,20 +1221,28 @@ export const contributeToGroup = async (req, res) => {
 			subAccount.balance,
 		);
 
-		// ✅ Update member contribution - accumulate payments
+		// ✅ Calculate new totals
 		const newTotalPaid = currentPaid + amount;
+		// ✅ FIX: Only set paid to true if fully paid
 		const isFullyPaid = newTotalPaid >= amountDue;
 
+		// ✅ Update member contribution
 		member.totalContributed += amount;
 		member.currentCycle = group.currentCycle;
 		member.cycleStatus = {
 			cycle: group.currentCycle,
+			// ✅ FIX: Only true when fully paid
 			paid: isFullyPaid,
 			amountDue: amountDue,
 			amountPaid: newTotalPaid,
+			// ✅ FIX: Only set paidAt when fully paid
 			paidAt: isFullyPaid ? new Date() : null,
 		};
 		await member.save();
+
+		console.log(
+			`✅ Member updated: Paid ${newTotalPaid}/${amountDue}, Fully paid: ${isFullyPaid}`,
+		);
 
 		// ✅ Create contribution record
 		const contribution = new GroupContribution({
@@ -1347,7 +1356,7 @@ export const contributeToGroup = async (req, res) => {
 				walletBalance: wallet.balance,
 				groupBalance: subAccount.balance,
 				allMembersPaid: allPaid,
-				isFullyPaid,
+				isFullyPaid: isFullyPaid,
 				totalPaidThisCycle: newTotalPaid,
 				remainingAmount: Math.max(0, amountDue - newTotalPaid),
 			},
