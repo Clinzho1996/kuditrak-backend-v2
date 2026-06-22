@@ -10,6 +10,218 @@ import mono, { pullTransactionsFromMono } from "../services/monoService.js";
 import { sendTransactionNotification } from "../services/notificationService.js";
 import { checkLimits } from "../services/subscriptionService.js";
 
+export const getAllTransactions = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { page = 1, limit = 50 } = req.query;
+
+		const pageNum = parseInt(page);
+		const limitNum = parseInt(limit);
+		const skip = (pageNum - 1) * limitNum;
+
+		let allTransactions = [];
+		let sourceCounts = {
+			wallet: 0,
+			card: 0,
+			manual: 0,
+			bank: 0,
+		};
+
+		console.log(`📊 Fetching all transactions for user ${userId}`);
+
+		// 1. Get Wallet Transactions (Anchor)
+		try {
+			const walletTransactions = await AnchorTransaction.find({ userId })
+				.sort({ createdAt: -1 })
+				.limit(limitNum)
+				.skip(skip)
+				.lean();
+
+			console.log(`💰 Found ${walletTransactions.length} wallet transactions`);
+
+			const formattedWallet = walletTransactions.map((tx) => ({
+				...tx,
+				source: "wallet",
+				_id: tx._id,
+				transactionId: tx._id,
+				amount: tx.amount || 0,
+				type: tx.type === "credit" ? "income" : "expense",
+				description: tx.description || tx.narration || "Wallet transaction",
+				createdAt: tx.createdAt,
+				currency: tx.currency || "NGN",
+				status: tx.status || "success",
+			}));
+
+			allTransactions = [...allTransactions, ...formattedWallet];
+			sourceCounts.wallet = formattedWallet.length;
+		} catch (err) {
+			console.log("⚠️ Could not fetch wallet transactions:", err.message);
+		}
+
+		// 2. Get Card Transactions (Bridgecard)
+		try {
+			// Get all user's cards
+			const cards = await BridgecardCard.find({
+				userId,
+				status: { $ne: "cancelled" },
+			});
+
+			console.log(`💳 Found ${cards.length} cards`);
+
+			for (const card of cards) {
+				if (!card.isAnchorCard && card.cardId) {
+					try {
+						const result = await bridgecardService.getCardTransactions(
+							card.cardId,
+							pageNum,
+						);
+						if (result.success && result.transactions) {
+							const formattedCard = result.transactions.map((tx) => {
+								let amount = tx.amount || 0;
+								// Bridgecard returns amount in cents
+								if (amount > 100) {
+									amount = amount / 100;
+								}
+
+								return {
+									...tx,
+									source: "card",
+									cardId: card.cardId,
+									cardLast4: card.last4,
+									cardName: card.metaData?.cardName || "Card",
+									_id: tx.id || tx._id || `card_${Date.now()}_${Math.random()}`,
+									transactionId: tx.id || tx._id || `card_${Date.now()}`,
+									amount: amount,
+									type: tx.type === "credit" ? "income" : "expense",
+									description:
+										tx.description || tx.merchantName || "Card transaction",
+									createdAt:
+										tx.createdAt || tx.date || new Date().toISOString(),
+									currency: tx.currency || "USD",
+									status: tx.status || "success",
+								};
+							});
+							allTransactions = [...allTransactions, ...formattedCard];
+							sourceCounts.card += formattedCard.length;
+						}
+					} catch (cardErr) {
+						console.log(
+							`⚠️ Could not fetch transactions for card ${card.cardId}:`,
+							cardErr.message,
+						);
+					}
+				}
+			}
+		} catch (err) {
+			console.log("⚠️ Could not fetch card transactions:", err.message);
+		}
+
+		// 3. Get Manual Transactions (using the Transaction model)
+		try {
+			const manualTransactions = await Transaction.find({
+				userId,
+				source: "manual",
+			})
+				.sort({ date: -1 })
+				.limit(limitNum)
+				.skip(skip)
+				.lean();
+
+			console.log(`📝 Found ${manualTransactions.length} manual transactions`);
+
+			const formattedManual = manualTransactions.map((tx) => ({
+				...tx,
+				source: "manual",
+				_id: tx._id,
+				transactionId: tx._id,
+				amount: tx.amount || 0,
+				type: tx.type === "income" ? "income" : "expense",
+				description: tx.description || "Manual transaction",
+				createdAt: tx.createdAt || tx.date || new Date().toISOString(),
+				currency: tx.currency || "NGN",
+				status: tx.status || "success",
+			}));
+
+			allTransactions = [...allTransactions, ...formattedManual];
+			sourceCounts.manual = formattedManual.length;
+		} catch (err) {
+			console.log("⚠️ Could not fetch manual transactions:", err.message);
+		}
+
+		// 4. Get Bank Transactions (from the Transaction model with source: "bank")
+		try {
+			const bankTransactions = await Transaction.find({
+				userId,
+				source: "bank",
+			})
+				.sort({ date: -1 })
+				.limit(limitNum)
+				.skip(skip)
+				.lean();
+
+			console.log(`🏦 Found ${bankTransactions.length} bank transactions`);
+
+			const formattedBank = bankTransactions.map((tx) => ({
+				...tx,
+				source: "bank",
+				_id: tx._id,
+				transactionId: tx._id,
+				amount: tx.amount || 0,
+				type: tx.type === "income" ? "income" : "expense",
+				description: tx.description || tx.narration || "Bank transaction",
+				createdAt: tx.createdAt || tx.date || new Date().toISOString(),
+				currency: tx.currency || "NGN",
+				status: tx.status || "success",
+				bankName: tx.bankName || tx.metadata?.bankName,
+				accountNumber: tx.accountNumber || tx.metadata?.accountNumber,
+			}));
+
+			allTransactions = [...allTransactions, ...formattedBank];
+			sourceCounts.bank = formattedBank.length;
+		} catch (err) {
+			console.log("⚠️ Could not fetch bank transactions:", err.message);
+		}
+
+		// Deduplicate and sort
+		const seen = new Set();
+		const uniqueTransactions = allTransactions.filter((tx) => {
+			const id = tx._id || tx.transactionId || tx.id;
+			if (seen.has(id)) return false;
+			seen.add(id);
+			return true;
+		});
+
+		console.log(`📊 Total unique transactions: ${uniqueTransactions.length}`);
+
+		// Sort by createdAt descending
+		const sorted = uniqueTransactions.sort((a, b) => {
+			const dateA = new Date(a.createdAt || a.date || 0);
+			const dateB = new Date(b.createdAt || b.date || 0);
+			return dateB.getTime() - dateA.getTime();
+		});
+
+		// Apply pagination to the combined result
+		const paginated = sorted.slice(0, limitNum);
+
+		res.status(200).json({
+			success: true,
+			transactions: paginated,
+			total: sorted.length,
+			page: pageNum,
+			limit: limitNum,
+			totalPages: Math.ceil(sorted.length / limitNum),
+			hasMore: paginated.length < sorted.length,
+			sources: sourceCounts,
+		});
+	} catch (error) {
+		console.error("❌ Error fetching all transactions:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+			message: "Failed to fetch transactions",
+		});
+	}
+};
 // List all transactions
 export const listTransactions = async (req, res) => {
 	try {
@@ -678,184 +890,5 @@ export const syncBankTransactions = async (req, res) => {
 	} catch (err) {
 		console.error("Sync bank transactions error:", err);
 		res.status(500).json({ error: err.message });
-	}
-};
-
-// backend/controllers/transactionController.js - Add this function
-
-/**
- * Get all transactions from ALL sources (wallet, card, bank, manual)
- * This aggregates transactions from different providers
- */
-export const getAllTransactions = async (req, res) => {
-	try {
-		const userId = req.user._id;
-		const { page = 1, limit = 50, source } = req.query;
-
-		const pageNum = parseInt(page);
-		const limitNum = parseInt(limit);
-		const skip = (pageNum - 1) * limitNum;
-
-		let allTransactions = [];
-
-		// 1. Get Wallet Transactions (Anchor)
-		try {
-			const walletTransactions = await AnchorTransaction.find({ userId })
-				.sort({ createdAt: -1 })
-				.limit(limitNum)
-				.skip(skip)
-				.lean();
-
-			const formattedWallet = walletTransactions.map((tx) => ({
-				...tx,
-				source: "wallet",
-				_id: tx._id,
-				transactionId: tx._id,
-				amount: tx.amount || 0,
-				type: tx.type === "credit" ? "income" : "expense",
-				description: tx.description || tx.narration || "Wallet transaction",
-				createdAt: tx.createdAt,
-			}));
-
-			allTransactions = [...allTransactions, ...formattedWallet];
-		} catch (err) {
-			console.log("⚠️ Could not fetch wallet transactions:", err.message);
-		}
-
-		// 2. Get Card Transactions (Bridgecard)
-		try {
-			// Get all user's cards
-			const cards = await BridgecardCard.find({
-				userId,
-				status: { $ne: "cancelled" },
-			});
-
-			for (const card of cards) {
-				if (!card.isAnchorCard && card.cardId) {
-					try {
-						const result = await bridgecardService.getCardTransactions(
-							card.cardId,
-							pageNum,
-						);
-						if (result.success && result.transactions) {
-							const formattedCard = result.transactions.map((tx) => ({
-								...tx,
-								source: "card",
-								cardId: card.cardId,
-								cardLast4: card.last4,
-								cardName: card.metaData?.cardName || "Card",
-								_id: tx.id || tx._id || `card_${Date.now()}_${Math.random()}`,
-								transactionId: tx.id || tx._id || `card_${Date.now()}`,
-								amount: tx.amount || 0,
-								type: tx.type === "credit" ? "income" : "expense",
-								description:
-									tx.description || tx.merchantName || "Card transaction",
-								createdAt: tx.createdAt || tx.date || new Date().toISOString(),
-								currency: tx.currency || "USD",
-							}));
-							allTransactions = [...allTransactions, ...formattedCard];
-						}
-					} catch (cardErr) {
-						console.log(
-							`⚠️ Could not fetch transactions for card ${card.cardId}:`,
-							cardErr.message,
-						);
-					}
-				}
-			}
-		} catch (err) {
-			console.log("⚠️ Could not fetch card transactions:", err.message);
-		}
-
-		// 3. Get Manual Transactions
-		try {
-			const manualTransactions = await TransactionHistory.find({ userId })
-				.sort({ createdAt: -1 })
-				.limit(limitNum)
-				.skip(skip)
-				.lean();
-
-			const formattedManual = manualTransactions.map((tx) => ({
-				...tx,
-				source: "manual",
-				_id: tx._id,
-				transactionId: tx._id,
-				amount: tx.amount || 0,
-				type: tx.type === "income" ? "income" : "expense",
-				description: tx.description || "Manual transaction",
-				createdAt: tx.createdAt,
-			}));
-
-			allTransactions = [...allTransactions, ...formattedManual];
-		} catch (err) {
-			console.log("⚠️ Could not fetch manual transactions:", err.message);
-		}
-
-		// 4. Get Bank Transactions
-		try {
-			const bankTransactions = await BankTransaction.find({ userId })
-				.sort({ createdAt: -1 })
-				.limit(limitNum)
-				.skip(skip)
-				.lean();
-
-			const formattedBank = bankTransactions.map((tx) => ({
-				...tx,
-				source: "bank",
-				_id: tx._id,
-				transactionId: tx._id,
-				amount: tx.amount || 0,
-				type: tx.type === "credit" ? "income" : "expense",
-				description: tx.description || tx.narration || "Bank transaction",
-				createdAt: tx.createdAt,
-				bankName: tx.bankName,
-				accountNumber: tx.accountNumber,
-			}));
-
-			allTransactions = [...allTransactions, ...formattedBank];
-		} catch (err) {
-			console.log("⚠️ Could not fetch bank transactions:", err.message);
-		}
-
-		// Deduplicate and sort
-		const seen = new Set();
-		const uniqueTransactions = allTransactions.filter((tx) => {
-			const id = tx._id || tx.transactionId || tx.id;
-			if (seen.has(id)) return false;
-			seen.add(id);
-			return true;
-		});
-
-		// Sort by createdAt descending
-		const sorted = uniqueTransactions.sort((a, b) => {
-			const dateA = new Date(a.createdAt || a.date || 0);
-			const dateB = new Date(b.createdAt || b.date || 0);
-			return dateB.getTime() - dateA.getTime();
-		});
-
-		// Apply pagination to the combined result
-		const paginated = sorted.slice(0, limitNum);
-
-		res.status(200).json({
-			success: true,
-			transactions: paginated,
-			total: sorted.length,
-			page: pageNum,
-			limit: limitNum,
-			totalPages: Math.ceil(sorted.length / limitNum),
-			sources: {
-				wallet: allTransactions.filter((t) => t.source === "wallet").length,
-				card: allTransactions.filter((t) => t.source === "card").length,
-				manual: allTransactions.filter((t) => t.source === "manual").length,
-				bank: allTransactions.filter((t) => t.source === "bank").length,
-			},
-		});
-	} catch (error) {
-		console.error("❌ Error fetching all transactions:", error);
-		res.status(500).json({
-			success: false,
-			error: error.message,
-			message: "Failed to fetch transactions",
-		});
 	}
 };
