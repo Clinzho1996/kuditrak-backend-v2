@@ -1348,6 +1348,8 @@ export const fundCard = async (
 /**
  * Unload funds from a card
  */
+// backend/services/bridgecardService.js - Fixed unloadCard
+
 export const unloadCard = async (
 	cardId,
 	amount,
@@ -1355,9 +1357,31 @@ export const unloadCard = async (
 	transactionReference = null,
 ) => {
 	try {
+		// ✅ IMPORTANT: Bridgecard expects amounts in cents for USD
+		// If the amount is in dollars, convert to cents
+		let finalAmount = amount;
+
+		if (currency === "USD") {
+			// If amount is less than 100, it's likely in dollars, convert to cents
+			if (amount < 100) {
+				finalAmount = Math.round(amount * 100);
+				console.log(
+					`💰 Converting $${amount} to ${finalAmount} cents for Bridgecard`,
+				);
+			}
+		} else if (currency === "NGN") {
+			// If amount is less than 100, it might be in NGN, convert to kobo
+			if (amount < 100) {
+				finalAmount = Math.round(amount * 100);
+				console.log(
+					`💰 Converting ₦${amount} to ${finalAmount} kobo for Bridgecard`,
+				);
+			}
+		}
+
 		const payload = {
 			card_id: cardId,
-			amount: amount.toString(),
+			amount: finalAmount.toString(),
 			currency: currency,
 		};
 
@@ -1365,10 +1389,14 @@ export const unloadCard = async (
 			payload.transaction_reference = transactionReference;
 		}
 
+		console.log("📤 Unload payload:", payload);
+
 		const response = await bridgecardApi.patch(
 			"/cards/unload_card_asynchronously",
 			payload,
 		);
+
+		console.log("📥 Unload response:", response.data);
 
 		if (response.data?.status === "success") {
 			return {
@@ -1376,6 +1404,7 @@ export const unloadCard = async (
 				message: response.data.message,
 				data: response.data.data,
 				transactionReference: response.data.data?.transaction_reference,
+				amountInCents: finalAmount,
 			};
 		}
 
