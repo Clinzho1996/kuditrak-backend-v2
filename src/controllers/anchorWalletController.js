@@ -896,6 +896,12 @@ export const verifyTopup = async (req, res) => {
  * Send money to another Kuditrak user (internal wallet transfer)
  * This matches the "Kuditrak User" tab in the frontend
  */
+// backend/controllers/anchorWalletController.js - Updated sendToKuditrakUser with better error handling
+
+/**
+ * Send money to another Kuditrak user (internal wallet transfer)
+ * Updated with PIN verification and better error handling
+ */
 export const sendToKuditrakUser = async (req, res) => {
 	try {
 		const senderId = req.user._id;
@@ -909,7 +915,7 @@ export const sendToKuditrakUser = async (req, res) => {
 		} = req.body;
 
 		console.log("🔵 Send to Kuditrak user:", {
-			senderId,
+			senderId: senderId.toString(),
 			recipientEmail,
 			recipientPhone,
 			recipientHandle,
@@ -920,6 +926,7 @@ export const sendToKuditrakUser = async (req, res) => {
 
 		// Validate amount
 		if (!amount || amount <= 0) {
+			console.log("❌ Invalid amount:", amount);
 			return res.status(400).json({
 				success: false,
 				error: "Invalid amount",
@@ -928,6 +935,7 @@ export const sendToKuditrakUser = async (req, res) => {
 		}
 
 		if (amount < 1) {
+			console.log("❌ Amount too small:", amount);
 			return res.status(400).json({
 				success: false,
 				error: "Minimum amount is ₦1",
@@ -938,7 +946,9 @@ export const sendToKuditrakUser = async (req, res) => {
 		// ✅ VERIFY PIN
 		try {
 			await verifyPin(senderId, pin);
+			console.log("✅ PIN verified successfully");
 		} catch (pinError) {
+			console.log("❌ PIN verification failed:", pinError.message);
 			return res.status(400).json({
 				success: false,
 				error: pinError.message,
@@ -949,13 +959,16 @@ export const sendToKuditrakUser = async (req, res) => {
 		// Find recipient by email, phone, or handle
 		let recipient;
 		if (recipientEmail) {
+			console.log("🔍 Searching for recipient by email:", recipientEmail);
 			recipient = await User.findOne({ email: recipientEmail });
 		} else if (recipientPhone) {
+			console.log("🔍 Searching for recipient by phone:", recipientPhone);
 			recipient = await User.findOne({ phoneNumber: recipientPhone });
 		} else if (recipientHandle) {
 			const cleanHandle = recipientHandle.startsWith("@")
 				? recipientHandle.substring(1)
 				: recipientHandle;
+			console.log("🔍 Searching for recipient by handle:", cleanHandle);
 			recipient = await User.findOne({
 				$or: [
 					{ fullName: { $regex: cleanHandle, $options: "i" } },
@@ -965,6 +978,7 @@ export const sendToKuditrakUser = async (req, res) => {
 		}
 
 		if (!recipient) {
+			console.log("❌ Recipient not found");
 			return res.status(404).json({
 				success: false,
 				error: "Recipient not found",
@@ -972,7 +986,15 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
+		console.log("✅ Recipient found:", {
+			id: recipient._id.toString(),
+			name: recipient.fullName,
+			email: recipient.email,
+		});
+
+		// Check if sender is trying to send to themselves
 		if (recipient._id.toString() === senderId.toString()) {
+			console.log("❌ Sender trying to send to themselves");
 			return res.status(400).json({
 				success: false,
 				error: "Invalid recipient",
@@ -987,6 +1009,7 @@ export const sendToKuditrakUser = async (req, res) => {
 		});
 
 		if (!senderWallet) {
+			console.log("❌ Sender wallet not found");
 			return res.status(404).json({
 				success: false,
 				error: "Sender wallet not found",
@@ -995,38 +1018,13 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
-		// Get recipient's wallet
-		let recipientWallet = await AnchorWallet.findOne({
-			userId: recipient._id,
-			walletType: "main",
-		});
+		console.log("💰 Sender wallet balance:", senderWallet.balance);
 
-		if (!recipientWallet) {
-			console.log("🔄 Creating wallet for recipient:", recipient._id);
-
-			const customerResult = await getOrCreateAnchorCustomer(recipient._id);
-			if (!customerResult.success) {
-				return res.status(400).json({
-					success: false,
-					error: "Could not create recipient wallet",
-					message: "Recipient account is not fully set up",
-				});
-			}
-
-			recipientWallet = await AnchorWallet.create({
-				userId: recipient._id,
-				anchorCustomerId: customerResult.customerId,
-				walletId: `local_${Date.now()}_${recipient._id.toString().slice(-6)}`,
-				walletType: "main",
-				balance: 0,
-				name: "Main Wallet",
-				currency: "NGN",
-				status: "active",
-				isLocal: true,
-			});
-		}
-
+		// Check sender's balance
 		if (senderWallet.balance < amount) {
+			console.log(
+				`❌ Insufficient balance: ${senderWallet.balance} < ${amount}`,
+			);
 			return res.status(400).json({
 				success: false,
 				error: "Insufficient balance",
@@ -1036,18 +1034,76 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
-		const reference = `SEND_${Date.now()}_${senderId.toString().slice(-6)}`;
+		// Get recipient's wallet
+		let recipientWallet = await AnchorWallet.findOne({
+			userId: recipient._id,
+			walletType: "main",
+		});
 
+		// If recipient doesn't have a wallet, create one
+		if (!recipientWallet) {
+			console.log("🔄 Creating wallet for recipient:", recipient._id);
+
+			try {
+				const customerResult = await getOrCreateAnchorCustomer(recipient._id);
+				if (!customerResult.success) {
+					console.log(
+						"❌ Failed to create recipient customer:",
+						customerResult.error,
+					);
+					return res.status(400).json({
+						success: false,
+						error: "Could not create recipient wallet",
+						message: "Recipient account is not fully set up",
+					});
+				}
+
+				recipientWallet = await AnchorWallet.create({
+					userId: recipient._id,
+					anchorCustomerId: customerResult.customerId,
+					walletId: `local_${Date.now()}_${recipient._id.toString().slice(-6)}`,
+					walletType: "main",
+					balance: 0,
+					name: "Main Wallet",
+					currency: "NGN",
+					status: "active",
+					isLocal: true,
+				});
+				console.log("✅ Recipient wallet created");
+			} catch (walletError) {
+				console.error("❌ Error creating recipient wallet:", walletError);
+				return res.status(400).json({
+					success: false,
+					error: "Could not create recipient wallet",
+					message: "Failed to set up recipient account",
+				});
+			}
+		}
+
+		// Generate reference
+		const reference = `SEND_${Date.now()}_${senderId.toString().slice(-6)}`;
+		console.log("📝 Transaction reference:", reference);
+
+		// Perform the transfer (atomic operation)
 		const session = await mongoose.startSession();
 		session.startTransaction();
 
 		try {
+			// Deduct from sender
 			senderWallet.balance -= amount;
 			await senderWallet.save({ session });
+			console.log(
+				`✅ Deducted ${amount} from sender, new balance: ${senderWallet.balance}`,
+			);
 
+			// Add to recipient
 			recipientWallet.balance += amount;
 			await recipientWallet.save({ session });
+			console.log(
+				`✅ Added ${amount} to recipient, new balance: ${recipientWallet.balance}`,
+			);
 
+			// Create sender transaction (debit)
 			const senderTransaction = await AnchorTransaction.create(
 				[
 					{
@@ -1079,6 +1135,7 @@ export const sendToKuditrakUser = async (req, res) => {
 				{ session },
 			);
 
+			// Create recipient transaction (credit)
 			const recipientTransaction = await AnchorTransaction.create(
 				[
 					{
@@ -1109,7 +1166,9 @@ export const sendToKuditrakUser = async (req, res) => {
 			);
 
 			await session.commitTransaction();
+			console.log("✅ Transaction committed successfully");
 
+			// Send notifications
 			await sendPushToUser(
 				senderId,
 				"💸 Money Sent",
@@ -1159,18 +1218,27 @@ export const sendToKuditrakUser = async (req, res) => {
 				note: note || "",
 				timestamp: new Date().toISOString(),
 			});
-		} catch (error) {
+		} catch (transactionError) {
+			console.error("❌ Transaction error:", transactionError);
 			await session.abortTransaction();
-			throw error;
+			throw transactionError;
 		} finally {
 			session.endSession();
 		}
 	} catch (error) {
-		console.error("❌ Send to Kuditrak user error:", error);
+		console.error("❌ Send to Kuditrak user error:", {
+			message: error.message,
+			stack: error.stack,
+			name: error.name,
+		});
+
+		// Send a detailed error response
 		res.status(500).json({
 			success: false,
-			error: error.message,
-			message: "Failed to send money",
+			error: error.message || "Failed to send money",
+			message:
+				error.message || "An unexpected error occurred while sending money",
+			details: process.env.NODE_ENV === "development" ? error.stack : undefined,
 		});
 	}
 };
