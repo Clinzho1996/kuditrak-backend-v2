@@ -1,4 +1,5 @@
-// backend/models/TransactionPin.js
+// backend/models/TransactionPin.js - Fixed
+
 import bcrypt from "bcrypt";
 import mongoose from "mongoose";
 
@@ -42,14 +43,13 @@ const transactionPinSchema = new mongoose.Schema({
 	updatedAt: { type: Date, default: Date.now },
 });
 
-// Hash PIN before saving
-transactionPinSchema.pre("save", async function (next) {
-	if (!this.isModified("pinHash")) return next();
+// Hash PIN before saving - FIXED
+transactionPinSchema.pre("save", async function () {
+	if (!this.isModified("pinHash")) return;
 
 	const salt = await bcrypt.genSalt(10);
 	this.pinSalt = salt;
 	this.pinHash = await bcrypt.hash(this.pinHash, salt);
-	next();
 });
 
 // Method to verify PIN
@@ -70,7 +70,9 @@ transactionPinSchema.methods.verifyPin = async function (pin) {
 		}
 
 		await this.save();
-		throw new Error("Invalid PIN");
+		throw new Error(
+			`Invalid PIN. ${5 - this.failedAttempts} attempts remaining.`,
+		);
 	}
 
 	// Reset failed attempts on successful verification
