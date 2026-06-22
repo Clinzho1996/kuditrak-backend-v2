@@ -1,4 +1,4 @@
-// controllers/groupSavingsController.js - Fixed with proper cycle management
+// controllers/groupSavingsController.js - Updated to support partial contributions
 
 import AnchorSubAccount from "../models/AnchorSubAccount.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
@@ -82,19 +82,18 @@ const getCycleEndDate = (group) => {
 };
 
 /**
- * Check if user has already contributed this cycle
+ * Check if user has fully paid for this cycle
  */
-const hasUserContributedThisCycle = (member) => {
-	return (
-		member.cycleStatus?.paid === true &&
-		member.cycleStatus?.cycle === member.currentCycle
-	);
+const hasUserFullyPaid = (member, contributionAmount) => {
+	const totalPaid = member.cycleStatus?.amountPaid || 0;
+	const amountDue = member.cycleStatus?.amountDue || contributionAmount;
+	return totalPaid >= amountDue;
 };
 
 /**
- * Check if all members have contributed for the current cycle
+ * Check if all members have fully paid for the cycle
  */
-const allMembersPaidForCycle = async (groupId, cycle) => {
+const allMembersFullyPaid = async (groupId, cycle, contributionAmount) => {
 	const members = await GroupMember.find({
 		groupId,
 		status: "active",
@@ -102,9 +101,11 @@ const allMembersPaidForCycle = async (groupId, cycle) => {
 
 	if (members.length === 0) return false;
 
-	const allPaid = members.every(
-		(m) => m.cycleStatus?.paid === true && m.cycleStatus?.cycle === cycle,
-	);
+	const allPaid = members.every((m) => {
+		const totalPaid = m.cycleStatus?.amountPaid || 0;
+		const amountDue = m.cycleStatus?.amountDue || contributionAmount;
+		return totalPaid >= amountDue;
+	});
 
 	return allPaid;
 };
@@ -117,11 +118,15 @@ const processPayout = async (groupId) => {
 		const group = await GroupSavings.findById(groupId);
 		if (!group) return;
 
-		// Check if all members have paid for this cycle
-		const allPaid = await allMembersPaidForCycle(groupId, group.currentCycle);
+		// Check if all members have fully paid for this cycle
+		const allPaid = await allMembersFullyPaid(
+			groupId,
+			group.currentCycle,
+			group.contributionAmount,
+		);
 		if (!allPaid) {
 			console.log(
-				`⚠️ Not all members have paid for cycle ${group.currentCycle}`,
+				`⚠️ Not all members have fully paid for cycle ${group.currentCycle}`,
 			);
 			return;
 		}
@@ -247,7 +252,7 @@ const processPayout = async (groupId) => {
 			});
 		}
 
-		// ✅ Mark all members as paid for this cycle and reset for next cycle
+		// ✅ Mark all members for next cycle
 		await GroupMember.updateMany(
 			{ groupId: group._id, status: "active" },
 			{
@@ -256,15 +261,15 @@ const processPayout = async (groupId) => {
 					"cycleStatus.paidAt": null,
 					"cycleStatus.amountPaid": 0,
 					"cycleStatus.cycle": group.currentCycle + 1,
+					"cycleStatus.amountDue": group.contributionAmount,
 					currentCycle: group.currentCycle + 1,
 				},
-				$inc: { totalContributed: 0 }, // Don't reset total contributed
 			},
 		);
 
 		// ✅ Advance to next cycle
 		group.currentCycle += 1;
-		group.totalContributions = 0; // Reset total contributions for new cycle
+		group.totalContributions = 0;
 		await group.save();
 
 		// Send notification to payout recipient
@@ -459,8 +464,8 @@ export const createGroup = async (req, res) => {
 				cycle: 1,
 				paid: false,
 				amountDue: contributionAmount,
-				paidAt: null,
 				amountPaid: 0,
+				paidAt: null,
 			},
 		});
 
@@ -556,11 +561,24 @@ export const getGroupDetails = async (req, res) => {
 			subAccountId: group.subAccountId,
 		});
 
-		// ✅ Get cycle info
 		const cycleStartDate = getCycleStartDate(group);
 		const cycleEndDate = getCycleEndDate(group);
 		const now = new Date();
 		const isCycleActive = now >= cycleStartDate && now < cycleEndDate;
+
+		// Get payment status for each member
+		const membersWithStatus = members.map((m) => {
+			const totalPaid = m.cycleStatus?.amountPaid || 0;
+			const amountDue = m.cycleStatus?.amountDue || group.contributionAmount;
+			const isFullyPaid = totalPaid >= amountDue;
+
+			return {
+				...m.toObject(),
+				paymentProgress: Math.min(100, (totalPaid / amountDue) * 100),
+				isFullyPaid,
+				remainingAmount: Math.max(0, amountDue - totalPaid),
+			};
+		});
 
 		console.log(
 			`✅ Found ${members.length} members and ${contributions.length} contributions`,
@@ -570,7 +588,7 @@ export const getGroupDetails = async (req, res) => {
 			success: true,
 			data: {
 				group,
-				members,
+				members: membersWithStatus,
 				contributions,
 				balance: subAccount?.balance || 0,
 				isAdmin: group.createdBy.toString() === userId.toString(),
@@ -622,8 +640,6 @@ export const getUserGroups = async (req, res) => {
 			.map((gm) => gm.groupId)
 			.filter((id) => id);
 
-		console.log(`📊 Group IDs:`, groupIds);
-
 		if (groupIds.length === 0) {
 			return res.status(200).json({
 				success: true,
@@ -653,6 +669,7 @@ export const getUserGroups = async (req, res) => {
 					cycle: group.currentCycle || 1,
 					paid: false,
 					amountDue: group.contributionAmount || 0,
+					amountPaid: 0,
 				},
 			};
 		});
@@ -785,8 +802,8 @@ export const joinGroup = async (req, res) => {
 				cycle: group.currentCycle,
 				paid: false,
 				amountDue: group.contributionAmount,
-				paidAt: null,
 				amountPaid: 0,
+				paidAt: null,
 			},
 		});
 
@@ -858,7 +875,7 @@ export const leaveGroup = async (req, res) => {
 				.json({ error: "You are not a member of this group" });
 		}
 
-		// ✅ Check if member has already received payout this cycle
+		// Check if member has received payout this cycle
 		const hasReceivedPayout = await GroupPayout.findOne({
 			groupId: group._id,
 			memberId: userId,
@@ -885,10 +902,11 @@ export const leaveGroup = async (req, res) => {
 			});
 		}
 
-		if (member.cycleStatus?.paid) {
+		// Check if member has partially paid
+		const amountPaid = member.cycleStatus?.amountPaid || 0;
+		if (amountPaid > 0) {
 			return res.status(400).json({
-				error:
-					"You have already contributed this cycle. Wait for payout or request refund.",
+				error: `You have contributed ₦${amountPaid.toLocaleString()} this cycle. Complete the full payment of ₦${group.contributionAmount.toLocaleString()} or wait for the cycle to end.`,
 			});
 		}
 
@@ -1002,7 +1020,7 @@ export const removeMember = async (req, res) => {
 			return res.status(404).json({ error: "Member not found" });
 		}
 
-		// ✅ Check if member has received payout
+		// Check if member has received payout
 		const hasReceivedPayout = await GroupPayout.findOne({
 			groupId: group._id,
 			memberId: memberId,
@@ -1101,36 +1119,31 @@ export const contributeToGroup = async (req, res) => {
 
 		console.log("👤 Member found:", member._id);
 
-		// ✅ Check if contribution amount matches
-		if (amount !== group.contributionAmount) {
+		// ✅ Check if user has already fully paid for this cycle
+		const currentPaid = member.cycleStatus?.amountPaid || 0;
+		const amountDue = member.cycleStatus?.amountDue || group.contributionAmount;
+		const remainingAmount = amountDue - currentPaid;
+
+		if (remainingAmount <= 0) {
 			return res.status(400).json({
-				error: `Contribution amount must be exactly ₦${group.contributionAmount.toLocaleString()}`,
+				error: `You have already fully paid ₦${currentPaid.toLocaleString()} for this cycle. Wait for the next cycle.`,
+				alreadyPaid: true,
+				amountPaid: currentPaid,
+				amountDue: amountDue,
 			});
 		}
 
-		// ✅ Check if user has already contributed this cycle
-		if (
-			member.cycleStatus?.paid === true &&
-			member.cycleStatus?.cycle === group.currentCycle
-		) {
+		// ✅ Check if amount exceeds remaining
+		if (amount > remainingAmount) {
 			return res.status(400).json({
-				error: `You have already contributed ₦${member.cycleStatus.amountPaid.toLocaleString()} for this cycle. Wait for the next cycle.`,
+				error: `Amount exceeds remaining balance. You only need ₦${remainingAmount.toLocaleString()} to complete this cycle.`,
+				remainingAmount: remainingAmount,
+				amountDue: amountDue,
+				currentPaid: currentPaid,
 			});
 		}
 
-		// ✅ Check if user has received payout and needs to contribute
-		const hasReceivedPayout = await GroupPayout.findOne({
-			groupId: group._id,
-			memberId: userId,
-			cycle: group.currentCycle - 1,
-			status: "completed",
-		});
-
-		if (hasReceivedPayout && member.totalContributed === 0) {
-			// This member received payout but hasn't contributed to next cycle
-			// They are allowed to contribute
-		}
-
+		// Check if user has wallet
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -1150,6 +1163,7 @@ export const contributeToGroup = async (req, res) => {
 			});
 		}
 
+		// Get or create sub-account
 		let subAccount = await AnchorSubAccount.findOne({
 			userId: group.createdBy,
 			subAccountId: group.subAccountId,
@@ -1206,17 +1220,22 @@ export const contributeToGroup = async (req, res) => {
 			subAccount.balance,
 		);
 
-		// Update member contribution		member.totalContributed += amount;
+		// ✅ Update member contribution - accumulate payments
+		const newTotalPaid = currentPaid + amount;
+		const isFullyPaid = newTotalPaid >= amountDue;
+
+		member.totalContributed += amount;
 		member.currentCycle = group.currentCycle;
 		member.cycleStatus = {
 			cycle: group.currentCycle,
-			paid: true,
-			amountDue: group.contributionAmount,
-			paidAt: new Date(),
-			amountPaid: amount,
+			paid: isFullyPaid,
+			amountDue: amountDue,
+			amountPaid: newTotalPaid,
+			paidAt: isFullyPaid ? new Date() : null,
 		};
 		await member.save();
 
+		// ✅ Create contribution record
 		const contribution = new GroupContribution({
 			groupId: group._id,
 			memberId: userId,
@@ -1228,15 +1247,20 @@ export const contributeToGroup = async (req, res) => {
 			metadata: {
 				walletBalance: wallet.balance,
 				subAccountBalance: subAccount.balance,
+				totalPaidThisCycle: newTotalPaid,
+				isFullyPaid: isFullyPaid,
+				remainingAmount: Math.max(0, amountDue - newTotalPaid),
 			},
 		});
 
 		await contribution.save();
 		console.log("✅ Contribution record created:", contribution._id);
 
+		// Update group total
 		group.totalContributions += amount;
 		await group.save();
 
+		// ✅ Create transaction record
 		await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: wallet.anchorCustomerId,
@@ -1247,7 +1271,7 @@ export const contributeToGroup = async (req, res) => {
 			type: "debit",
 			category: "transfer",
 			status: "success",
-			description: `Contribution to group: ${group.name}`,
+			description: `Contribution to group: ${group.name} (${isFullyPaid ? "Fully Paid" : "Partial Payment"})`,
 			source: "wallet",
 			destination: "sub_account",
 			metadata: {
@@ -1255,33 +1279,67 @@ export const contributeToGroup = async (req, res) => {
 				groupName: group.name,
 				contributionId: contribution._id,
 				isGroupContribution: true,
+				isFullyPaid: isFullyPaid,
+				totalPaidThisCycle: newTotalPaid,
 			},
 		});
 
-		// ✅ Check if all members have paid for this cycle
-		const allPaid = await allMembersPaidForCycle(groupId, group.currentCycle);
+		// ✅ Check if all members have fully paid
+		const allPaid = await allMembersFullyPaid(
+			groupId,
+			group.currentCycle,
+			group.contributionAmount,
+		);
 
 		if (allPaid) {
-			console.log("🎉 All members paid! Processing payout...");
+			console.log("🎉 All members fully paid! Processing payout...");
 			await processPayout(group._id);
+
+			// Send notification to all members
+			const allMembers = await GroupMember.find({
+				groupId: group._id,
+				status: "active",
+			});
+
+			for (const m of allMembers) {
+				await sendPushToUser(
+					m.userId,
+					"🎉 All Members Paid!",
+					`All members have fully paid for cycle ${group.currentCycle}. Payout is being processed!`,
+					{
+						type: "group_cycle_complete",
+						groupId: group._id,
+						cycle: group.currentCycle,
+					},
+				);
+			}
 		} else {
-			// Send notification to member
+			// Send notification based on payment status
+			const statusMessage = isFullyPaid
+				? `You have fully paid ₦${amountDue.toLocaleString()} for this cycle! 🎉`
+				: `You have contributed ₦${newTotalPaid.toLocaleString()} of ₦${amountDue.toLocaleString()}. Remaining: ₦${(amountDue - newTotalPaid).toLocaleString()}`;
+
 			await sendPushToUser(
 				userId,
-				"💰 Contribution Successful!",
-				`₦${amount.toLocaleString()} contributed to "${group.name}" (Cycle ${group.currentCycle})`,
+				isFullyPaid ? "💰 Contribution Complete!" : "💰 Contribution Received!",
+				statusMessage,
 				{
 					type: "group_contribution",
 					groupId: group._id,
 					amount,
 					cycle: group.currentCycle,
+					isFullyPaid,
+					totalPaid: newTotalPaid,
+					remainingAmount: amountDue - newTotalPaid,
 				},
 			);
 		}
 
 		res.status(200).json({
 			success: true,
-			message: "Contribution successful",
+			message: isFullyPaid
+				? "Contribution completed!"
+				: "Contribution received",
 			data: {
 				contribution,
 				member,
@@ -1289,6 +1347,9 @@ export const contributeToGroup = async (req, res) => {
 				walletBalance: wallet.balance,
 				groupBalance: subAccount.balance,
 				allMembersPaid: allPaid,
+				isFullyPaid,
+				totalPaidThisCycle: newTotalPaid,
+				remainingAmount: Math.max(0, amountDue - newTotalPaid),
 			},
 		});
 	} catch (err) {
@@ -1414,11 +1475,34 @@ export const processPayoutManually = async (req, res) => {
 			return res.status(403).json({ error: "Only admins can process payouts" });
 		}
 
-		// ✅ Check if all members have paid before processing payout
-		const allPaid = await allMembersPaidForCycle(groupId, group.currentCycle);
+		// ✅ Check if all members have fully paid
+		const allPaid = await allMembersFullyPaid(
+			groupId,
+			group.currentCycle,
+			group.contributionAmount,
+		);
 		if (!allPaid) {
+			const members = await GroupMember.find({
+				groupId: group._id,
+				status: "active",
+			});
+
+			const unpaidMembers = members.filter((m) => {
+				const paid = m.cycleStatus?.amountPaid || 0;
+				const due = m.cycleStatus?.amountDue || group.contributionAmount;
+				return paid < due;
+			});
+
 			return res.status(400).json({
-				error: `Not all members have contributed for cycle ${group.currentCycle}. Cannot process payout.`,
+				error: `Not all members have fully paid for cycle ${group.currentCycle}. ${unpaidMembers.length} member(s) still need to complete their contributions.`,
+				unpaidMembers: unpaidMembers.map((m) => ({
+					name: m.userId?.fullName || "Unknown",
+					amountPaid: m.cycleStatus?.amountPaid || 0,
+					amountDue: m.cycleStatus?.amountDue || group.contributionAmount,
+					remaining:
+						(m.cycleStatus?.amountDue || group.contributionAmount) -
+						(m.cycleStatus?.amountPaid || 0),
+				})),
 			});
 		}
 
