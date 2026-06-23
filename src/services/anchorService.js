@@ -1,4 +1,4 @@
-// backend/services/anchorService.js - Complete version
+// backend/services/anchorService.js - Complete version with all methods
 
 import axios from "axios";
 import crypto from "crypto";
@@ -414,6 +414,99 @@ export const createDepositAccount = async (
 };
 
 /**
+ * Get all deposit accounts for a customer
+ * ✅ NEW METHOD - Required for syncing accounts
+ */
+export const getDepositAccounts = async (customerId) => {
+	try {
+		console.log(`🔍 Fetching deposit accounts for customer: ${customerId}`);
+
+		const response = await makeAnchorRequest(
+			"get",
+			`/deposit-accounts?customerId=${customerId}`,
+		);
+
+		console.log("📥 Get deposit accounts response:", response.data);
+
+		if (response.data?.data) {
+			const accounts = response.data.data.map((account) => {
+				const attributes = account.attributes || {};
+				return {
+					id: account.id,
+					accountId: account.id,
+					productName: attributes.productName,
+					status: attributes.status,
+					balance: attributes.balance || 0,
+					currency: attributes.currency || "NGN",
+					createdAt: attributes.createdAt,
+					updatedAt: attributes.updatedAt,
+				};
+			});
+
+			return {
+				success: true,
+				accounts: accounts,
+				total: response.data.meta?.total || accounts.length,
+			};
+		}
+
+		return {
+			success: false,
+			error: "Failed to fetch accounts",
+		};
+	} catch (error) {
+		console.error("❌ Get deposit accounts error:", error);
+		return handleAnchorError(error);
+	}
+};
+
+/**
+ * Get a single deposit account by ID
+ * ✅ NEW METHOD - Required for refreshing account details
+ */
+export const getDepositAccount = async (accountId) => {
+	try {
+		console.log(`🔍 Fetching deposit account: ${accountId}`);
+
+		const response = await makeAnchorRequest(
+			"get",
+			`/deposit-accounts/${accountId}`,
+		);
+
+		console.log("📥 Get deposit account response:", response.data);
+
+		if (response.data?.data) {
+			const account = response.data.data;
+			const attributes = account.attributes || {};
+
+			return {
+				success: true,
+				account: {
+					id: account.id,
+					accountId: account.id,
+					productName: attributes.productName,
+					status: attributes.status,
+					balance: attributes.balance || 0,
+					currency: attributes.currency || "NGN",
+					accountNumber: attributes.accountNumber || attributes.nuban,
+					bankName: attributes.bankName || "Anchor Bank",
+					createdAt: attributes.createdAt,
+					updatedAt: attributes.updatedAt,
+				},
+			};
+		}
+
+		return {
+			success: false,
+			error: "Account not found",
+		};
+	} catch (error) {
+		console.error("❌ Get deposit account error:", error);
+		return handleAnchorError(error);
+	}
+};
+
+/**
  * Get deposit account balance
  */
 export const getDepositAccountBalance = async (depositAccountId) => {
@@ -437,6 +530,66 @@ export const getDepositAccountBalance = async (depositAccountId) => {
 			error: "Failed to fetch balance",
 		};
 	} catch (error) {
+		return handleAnchorError(error);
+	}
+};
+
+/**
+ * Get account transactions
+ * ✅ NEW METHOD - For fetching transaction history
+ */
+export const getAccountTransactions = async (
+	accountId,
+	limit = 50,
+	offset = 0,
+) => {
+	try {
+		console.log(`🔍 Fetching transactions for account: ${accountId}`);
+
+		const response = await makeAnchorRequest(
+			"get",
+			`/deposit-accounts/${accountId}/transactions?limit=${limit}&offset=${offset}`,
+		);
+
+		console.log("📥 Get account transactions response:", response.data);
+
+		if (response.data?.data) {
+			const transactions = response.data.data.map((tx) => {
+				const attributes = tx.attributes || {};
+				return {
+					id: tx.id,
+					amount: attributes.amount || 0,
+					type: attributes.type || "unknown",
+					description:
+						attributes.description || attributes.narration || "Transaction",
+					senderName: attributes.senderName || attributes.senderAccountName,
+					senderAccountNumber: attributes.senderAccountNumber,
+					status: attributes.status || "completed",
+					date: attributes.date || attributes.createdAt || new Date(),
+					reference: attributes.reference || attributes.transactionReference,
+					currency: attributes.currency || "NGN",
+				};
+			});
+
+			return {
+				success: true,
+				transactions: transactions,
+				total: response.data.meta?.total || transactions.length,
+				pagination: {
+					limit: limit,
+					offset: offset,
+					hasMore:
+						offset + limit < (response.data.meta?.total || transactions.length),
+				},
+			};
+		}
+
+		return {
+			success: false,
+			error: "Failed to fetch transactions",
+		};
+	} catch (error) {
+		console.error("❌ Get account transactions error:", error);
 		return handleAnchorError(error);
 	}
 };
@@ -544,6 +697,51 @@ export const getVirtualNubans = async (depositAccountId) => {
 	}
 };
 
+/**
+ * Get account number from deposit account
+ * ✅ NEW METHOD - For getting the actual account number
+ */
+export const getAccountNumber = async (depositAccountId) => {
+	try {
+		console.log(`🔍 Getting account number for: ${depositAccountId}`);
+
+		// First try to get virtual NUBANs
+		const nubanResult = await getVirtualNubans(depositAccountId);
+
+		if (nubanResult.success && nubanResult.nubans.length > 0) {
+			const nuban = nubanResult.nubans[0];
+			return {
+				success: true,
+				accountNumber: nuban.accountNumber,
+				bankName: nuban.bankName,
+				accountName: nuban.accountName,
+				bankCode: nuban.bankCode,
+			};
+		}
+
+		// If no virtual NUBAN, try to get from deposit account
+		const accountResult = await getDepositAccount(depositAccountId);
+
+		if (accountResult.success) {
+			return {
+				success: true,
+				accountNumber: accountResult.account.accountNumber || "pending",
+				bankName: accountResult.account.bankName || "Anchor Bank",
+				accountName: accountResult.account.accountName || "Kuditrak User",
+				bankCode: "000",
+			};
+		}
+
+		return {
+			success: false,
+			error: "Could not get account number",
+		};
+	} catch (error) {
+		console.error("❌ Get account number error:", error);
+		return handleAnchorError(error);
+	}
+};
+
 // ==================== WEBHOOK ====================
 
 /**
@@ -580,7 +778,11 @@ export default {
 
 	// Deposit Accounts (Wallets)
 	createDepositAccount,
+	getDepositAccount,
+	getDepositAccounts,
 	getDepositAccountBalance,
+	getAccountTransactions,
+	getAccountNumber,
 
 	// Virtual NUBAN (Top-up accounts)
 	createVirtualNuban,

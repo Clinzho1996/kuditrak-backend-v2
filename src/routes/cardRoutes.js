@@ -29,7 +29,7 @@ const router = express.Router();
 // ============= PUBLIC ROUTES (NO AUTH) =============
 // ✅ Exchange rate - public endpoint
 router.get("/exchange-rate", getExchangeRate);
-router.get("/transactions", getNGNCardTransactions);
+router.get("/transactions", get);
 
 // ============= PROTECTED ROUTES (AUTH REQUIRED) =============
 router.use(protect);
