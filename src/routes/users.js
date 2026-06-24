@@ -1,11 +1,9 @@
-import express from "express";
+// backend/routes/userRoutes.js - Add Dojah routes
 
-import {
-	getAnchorCustomerStatus,
-	retryAnchorCustomerCreation,
-} from "../controllers/authController.js";
+import express from "express";
 import {
 	checkConnectionLimit,
+	completeKYC,
 	deleteAccount,
 	getDeviceTokens,
 	getInsights,
@@ -19,50 +17,54 @@ import {
 	updateProfile,
 	updateProfileImage,
 	uploadIDImage,
+	verifyAddress,
+	verifyBVN,
+	verifyDriversLicense,
+	verifyLiveness,
+	verifyNIN,
+	verifyPassport,
 } from "../controllers/userContoller.js";
 import protect from "../middleware/auth.js";
 import upload from "../middleware/upload.js";
 
 const router = express.Router();
 
-// Get logged in user profile
+// Profile Routes
 router.get("/profile", protect, getProfile);
-
-// Update profile image
+router.put("/profile", protect, updateProfile);
 router.put(
 	"/profile-image",
 	protect,
 	upload.single("image"),
 	updateProfileImage,
 );
-
-// Get financial insights
 router.get("/insights", protect, getInsights);
 
-// Update profile
-router.put("/profile", protect, updateProfile);
-
-// ================= KYC Routes =================
-// Update KYC information
-router.post("/kyc", protect, updateKYC);
+// Search
 router.get("/search", protect, searchKuditrakUsers);
 
-// Get KYC status
+// KYC Routes
 router.get("/kyc/status", protect, getKYCStatus);
+router.post("/kyc", protect, updateKYC);
 router.post("/upload-id-image", protect, upload.single("image"), uploadIDImage);
-router.post("/anchor/retry", protect, retryAnchorCustomerCreation);
-router.get("/anchor/status", protect, getAnchorCustomerStatus);
 
-// ================= Push Notification Routes =================
-router.post("/test", protect, testPushNotification);
+// Dojah KYC Routes
+router.post("/kyc/verify-nin", protect, verifyNIN);
+router.post("/kyc/verify-bvn", protect, verifyBVN);
+router.post("/kyc/verify-passport", protect, verifyPassport);
+router.post("/kyc/verify-drivers-license", protect, verifyDriversLicense);
+router.post("/kyc/verify-address", protect, verifyAddress);
+router.post("/kyc/verify-liveness", protect, verifyLiveness);
+router.post("/kyc/complete", protect, completeKYC);
+
+// Push Notification Routes
 router.post("/device-token", protect, registerDeviceToken);
 router.delete("/device-token", protect, unregisterDeviceToken);
 router.get("/device-tokens", protect, getDeviceTokens);
+router.post("/test-push", protect, testPushNotification);
 
-// ================= Limit Check Routes =================
+// Account Management
 router.get("/check-limit", protect, checkConnectionLimit);
-
-// Delete user account
 router.delete("/delete-account", protect, deleteAccount);
 
 export default router;

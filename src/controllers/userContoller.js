@@ -1,3 +1,5 @@
+// backend/controllers/userController.js - Add Dojah integration
+
 import { v2 as cloudinary } from "cloudinary";
 import dotenv from "dotenv";
 import BankConnection from "../models/BankConnection.js";
@@ -10,6 +12,7 @@ import {
 	upgradeCustomerToTier1,
 } from "../services/anchorCustomerService.js";
 import bridgecardService from "../services/bridgecardService.js";
+import dojahService from "../services/dojahService.js";
 import {
 	removeDeviceToken,
 	saveDeviceToken,
@@ -27,9 +30,578 @@ cloudinary.config({
 
 /*
 |--------------------------------------------------------------------------
-| Get Financial Insights
+| Verify NIN with Dojah
 |--------------------------------------------------------------------------
 */
+export const verifyNIN = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { nin, dateOfBirth, firstName, lastName } = req.body;
+
+		if (!nin || nin.length !== 11) {
+			return res.status(400).json({
+				success: false,
+				error: "Valid 11-digit NIN is required",
+			});
+		}
+
+		if (!dateOfBirth) {
+			return res.status(400).json({
+				success: false,
+				error: "Date of birth is required",
+			});
+		}
+
+		const user = await User.findById(userId);
+		if (!user) {
+			return res.status(404).json({ error: "User not found" });
+		}
+
+		// Call Dojah to verify NIN
+		const result = await dojahService.verifyNIN(
+			nin,
+			firstName || user.fullName.split(" ")[0],
+			lastName || user.fullName.split(" ").slice(1).join(" ") || firstName,
+			dateOfBirth,
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error || "NIN verification failed",
+			});
+		}
+
+		// Save NIN verification result
+		user.kyc = user.kyc || {};
+		user.kyc.bvn = nin; // Store NIN in BVN field
+		user.kyc.bvnVerified = result.verified;
+		user.kyc.dateOfBirth = new Date(dateOfBirth);
+		user.kyc.isVerified = result.verified;
+		user.kyc.verifiedAt = result.verified ? new Date() : null;
+
+		if (result.data) {
+			user.kyc.identification = {
+				type: "nin",
+				number: nin,
+				imageUrl: result.data.photo || null,
+			};
+		}
+
+		await user.save();
+
+		// If verified, create virtual account and register with Bridgecard
+		if (result.verified) {
+			await createVirtualAccountForUser(userId);
+			await registerWithBridgecard(userId);
+		}
+
+		res.status(200).json({
+			success: true,
+			verified: result.verified,
+			message: result.verified
+				? "NIN verified successfully"
+				: "NIN verification pending",
+			data: {
+				fullName: result.fullName,
+				dateOfBirth: result.dateOfBirth,
+				gender: result.gender,
+				photo: result.photo,
+				verified: result.verified,
+			},
+		});
+	} catch (error) {
+		console.error("❌ NIN verification error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
+/*
+|--------------------------------------------------------------------------
+| Verify BVN with Dojah
+|--------------------------------------------------------------------------
+*/
+export const verifyBVN = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { bvn, dateOfBirth, phoneNumber } = req.body;
+
+		if (!bvn || bvn.length !== 11) {
+			return res.status(400).json({
+				success: false,
+				error: "Valid 11-digit BVN is required",
+			});
+		}
+
+		const user = await User.findById(userId);
+		if (!user) {
+			return res.status(404).json({ error: "User not found" });
+		}
+
+		// Call Dojah to verify BVN
+		const result = await dojahService.verifyBVN(
+			bvn,
+			dateOfBirth || user.kyc?.dateOfBirth?.toISOString().split("T")[0],
+			phoneNumber || user.phoneNumber,
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error || "BVN verification failed",
+			});
+		}
+
+		// Save BVN verification result
+		user.kyc = user.kyc || {};
+		user.kyc.bvn = bvn;
+		user.kyc.bvnVerified = result.verified;
+		user.kyc.dateOfBirth = result.dateOfBirth
+			? new Date(result.dateOfBirth)
+			: user.kyc.dateOfBirth;
+		user.kyc.gender = result.gender || user.kyc.gender;
+		user.kyc.isVerified = result.verified || user.kyc.isVerified;
+		user.kyc.verifiedAt = result.verified ? new Date() : user.kyc.verifiedAt;
+
+		await user.save();
+
+		if (result.verified) {
+			await createVirtualAccountForUser(userId);
+			await registerWithBridgecard(userId);
+		}
+
+		res.status(200).json({
+			success: true,
+			verified: result.verified,
+			message: result.verified
+				? "BVN verified successfully"
+				: "BVN verification pending",
+			data: {
+				fullName: result.fullName,
+				dateOfBirth: result.dateOfBirth,
+				gender: result.gender,
+				image: result.image,
+				verified: result.verified,
+			},
+		});
+	} catch (error) {
+		console.error("❌ BVN verification error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
+/*
+|--------------------------------------------------------------------------
+| Verify International Passport
+|--------------------------------------------------------------------------
+*/
+export const verifyPassport = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { passportNumber, firstName, lastName, dateOfBirth, expiryDate } =
+			req.body;
+
+		if (!passportNumber) {
+			return res.status(400).json({
+				success: false,
+				error: "Passport number is required",
+			});
+		}
+
+		const user = await User.findById(userId);
+		if (!user) {
+			return res.status(404).json({ error: "User not found" });
+		}
+
+		const result = await dojahService.verifyPassport(
+			passportNumber,
+			firstName || user.fullName.split(" ")[0],
+			lastName || user.fullName.split(" ").slice(1).join(" ") || firstName,
+			dateOfBirth || user.kyc?.dateOfBirth?.toISOString().split("T")[0],
+			expiryDate,
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error || "Passport verification failed",
+			});
+		}
+
+		user.kyc = user.kyc || {};
+		user.kyc.identification = {
+			type: "passport",
+			number: passportNumber,
+		};
+		user.kyc.isVerified = result.verified || user.kyc.isVerified;
+		user.kyc.verifiedAt = result.verified ? new Date() : user.kyc.verifiedAt;
+
+		await user.save();
+
+		if (result.verified) {
+			await createVirtualAccountForUser(userId);
+			await registerWithBridgecard(userId);
+		}
+
+		res.status(200).json({
+			success: true,
+			verified: result.verified,
+			message: result.verified
+				? "Passport verified successfully"
+				: "Passport verification pending",
+			data: result.data,
+		});
+	} catch (error) {
+		console.error("❌ Passport verification error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
+/*
+|--------------------------------------------------------------------------
+| Verify Driver's License
+|--------------------------------------------------------------------------
+*/
+export const verifyDriversLicense = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { licenseNumber, dateOfBirth } = req.body;
+
+		if (!licenseNumber) {
+			return res.status(400).json({
+				success: false,
+				error: "Driver's license number is required",
+			});
+		}
+
+		const user = await User.findById(userId);
+		if (!user) {
+			return res.status(404).json({ error: "User not found" });
+		}
+
+		const result = await dojahService.verifyDriversLicense(
+			licenseNumber,
+			dateOfBirth || user.kyc?.dateOfBirth?.toISOString().split("T")[0],
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error || "Driver's license verification failed",
+			});
+		}
+
+		user.kyc = user.kyc || {};
+		user.kyc.identification = {
+			type: "driver_license",
+			number: licenseNumber,
+		};
+		user.kyc.isVerified = result.verified || user.kyc.isVerified;
+		user.kyc.verifiedAt = result.verified ? new Date() : user.kyc.verifiedAt;
+
+		await user.save();
+
+		if (result.verified) {
+			await createVirtualAccountForUser(userId);
+			await registerWithBridgecard(userId);
+		}
+
+		res.status(200).json({
+			success: true,
+			verified: result.verified,
+			message: result.verified
+				? "Driver's license verified successfully"
+				: "Verification pending",
+			data: result.data,
+		});
+	} catch (error) {
+		console.error("❌ Driver's license verification error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
+/*
+|--------------------------------------------------------------------------
+| Verify Proof of Address with Dojah
+|--------------------------------------------------------------------------
+*/
+export const verifyAddress = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { imageUrl, address } = req.body;
+
+		if (!imageUrl) {
+			return res.status(400).json({
+				success: false,
+				error: "Address document image is required",
+			});
+		}
+
+		const user = await User.findById(userId);
+		if (!user) {
+			return res.status(404).json({ error: "User not found" });
+		}
+
+		const result = await dojahService.verifyAddress(
+			imageUrl,
+			address || user.kyc?.address?.street,
+			user.fullName,
+		);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error || "Address verification failed",
+			});
+		}
+
+		// Save address verification result
+		user.kyc = user.kyc || {};
+		user.kyc.address = {
+			street: result.address || user.kyc.address?.street,
+			city: user.kyc.address?.city || "",
+			state: user.kyc.address?.state || "",
+			country: "NG",
+		};
+		user.kyc.isVerified = result.verified || user.kyc.isVerified;
+		user.kyc.verifiedAt = result.verified ? new Date() : user.kyc.verifiedAt;
+
+		await user.save();
+
+		if (result.verified) {
+			await createVirtualAccountForUser(userId);
+			await registerWithBridgecard(userId);
+		}
+
+		res.status(200).json({
+			success: true,
+			verified: result.verified,
+			message: result.verified
+				? "Address verified successfully"
+				: "Address verification pending",
+			confidence: result.confidence,
+			address: result.address,
+		});
+	} catch (error) {
+		console.error("❌ Address verification error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
+/*
+|--------------------------------------------------------------------------
+| Liveness Check with Dojah
+|--------------------------------------------------------------------------
+*/
+export const verifyLiveness = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { selfieImage, idImage } = req.body;
+
+		if (!selfieImage) {
+			return res.status(400).json({
+				success: false,
+				error: "Selfie image is required",
+			});
+		}
+
+		const user = await User.findById(userId);
+		if (!user) {
+			return res.status(404).json({ error: "User not found" });
+		}
+
+		// Get ID image from user's KYC or use provided
+		const idImageUrl = idImage || user.kyc?.identification?.imageUrl;
+
+		if (!idImageUrl) {
+			return res.status(400).json({
+				success: false,
+				error:
+					"ID image is required for liveness check. Please upload your ID first.",
+			});
+		}
+
+		const result = await dojahService.livenessCheck(selfieImage, idImageUrl);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error || "Liveness check failed",
+			});
+		}
+
+		// Save liveness check result
+		user.kyc = user.kyc || {};
+		user.kyc.isVerified = result.passed || user.kyc.isVerified;
+		user.kyc.verifiedAt = result.passed ? new Date() : user.kyc.verifiedAt;
+
+		await user.save();
+
+		if (result.passed) {
+			await createVirtualAccountForUser(userId);
+			await registerWithBridgecard(userId);
+		}
+
+		res.status(200).json({
+			success: true,
+			passed: result.passed,
+			message: result.passed
+				? "Liveness check passed"
+				: "Liveness check failed",
+			confidence: result.confidence,
+			isReal: result.isReal,
+			antiSpoofing: result.antiSpoofing,
+		});
+	} catch (error) {
+		console.error("❌ Liveness check error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
+/*
+|--------------------------------------------------------------------------
+| Complete KYC Verification (All-in-one)
+|--------------------------------------------------------------------------
+*/
+export const completeKYC = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		const { nin, bvn, dateOfBirth, gender, address, idType, idNumber } =
+			req.body;
+
+		const user = await User.findById(userId);
+		if (!user) {
+			return res.status(404).json({ error: "User not found" });
+		}
+
+		// Initialize KYC object
+		user.kyc = user.kyc || {};
+		user.kyc.address = user.kyc.address || {};
+
+		let verificationResults = {
+			ninVerified: false,
+			bvnVerified: false,
+			addressVerified: false,
+			idVerified: false,
+			isVerified: false,
+		};
+
+		// 1. Verify NIN if provided
+		if (nin && nin.length === 11) {
+			const ninResult = await dojahService.verifyNIN(
+				nin,
+				user.fullName.split(" ")[0],
+				user.fullName.split(" ").slice(1).join(" ") || user.fullName,
+				dateOfBirth || user.kyc?.dateOfBirth?.toISOString().split("T")[0],
+			);
+			if (ninResult.success && ninResult.verified) {
+				verificationResults.ninVerified = true;
+				user.kyc.bvn = nin;
+				user.kyc.bvnVerified = true;
+				user.kyc.dateOfBirth = new Date(dateOfBirth);
+			}
+		}
+
+		// 2. Verify BVN if provided
+		if (bvn && bvn.length === 11 && !verificationResults.ninVerified) {
+			const bvnResult = await dojahService.verifyBVN(
+				bvn,
+				dateOfBirth || user.kyc?.dateOfBirth?.toISOString().split("T")[0],
+				user.phoneNumber,
+			);
+			if (bvnResult.success && bvnResult.verified) {
+				verificationResults.bvnVerified = true;
+				user.kyc.bvn = bvn;
+				user.kyc.bvnVerified = true;
+				if (bvnResult.dateOfBirth) {
+					user.kyc.dateOfBirth = new Date(bvnResult.dateOfBirth);
+				}
+				if (bvnResult.gender) {
+					user.kyc.gender = bvnResult.gender;
+				}
+			}
+		}
+
+		// 3. Verify Address
+		if (address?.street) {
+			// Address is already provided, mark as verified
+			verificationResults.addressVerified = true;
+			user.kyc.address = {
+				street: address.street,
+				city: address.city || user.kyc.address?.city || "",
+				state: address.state || user.kyc.address?.state || "",
+				country: address.country || "NG",
+				postalCode: address.postalCode || user.kyc.address?.postalCode || "",
+			};
+		}
+
+		// 4. Verify ID
+		if (idType && idNumber) {
+			verificationResults.idVerified = true;
+			user.kyc.identification = {
+				type: idType,
+				number: idNumber,
+			};
+		}
+
+		// 5. Set gender if provided
+		if (gender) {
+			user.kyc.gender = gender;
+		}
+
+		// Check if all verifications passed
+		const hasRequiredKYC =
+			(verificationResults.ninVerified || verificationResults.bvnVerified) &&
+			verificationResults.addressVerified &&
+			verificationResults.idVerified;
+
+		user.kyc.isVerified = hasRequiredKYC;
+		user.kyc.verifiedAt = hasRequiredKYC ? new Date() : null;
+
+		await user.save();
+
+		// Create virtual account and register with Bridgecard if KYC is complete
+		if (hasRequiredKYC) {
+			await createVirtualAccountForUser(userId);
+			await registerWithBridgecard(userId);
+		}
+
+		res.status(200).json({
+			success: true,
+			kyc: {
+				isVerified: user.kyc.isVerified,
+				isComplete: hasRequiredKYC,
+				verificationResults,
+				verifiedAt: user.kyc.verifiedAt,
+			},
+		});
+	} catch (error) {
+		console.error("❌ Complete KYC error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
+
 export const getInsights = async (req, res) => {
 	try {
 		const insights = await generateFinancialInsights(req.user._id);
