@@ -6,11 +6,6 @@ import BankConnection from "../models/BankConnection.js";
 import BridgecardCardholder from "../models/BridgecardCardholder.js";
 import User from "../models/User.js";
 import { generateFinancialInsights } from "../services/aiService.js";
-import {
-	getCustomerKYCStatus,
-	getOrCreateAnchorCustomer,
-	upgradeCustomerToTier1,
-} from "../services/anchorCustomerService.js";
 import bridgecardService from "../services/bridgecardService.js";
 import dojahService from "../services/dojahService.js";
 import {
@@ -487,6 +482,8 @@ export const completeKYC = async (req, res) => {
 		const { nin, bvn, dateOfBirth, gender, address, idType, idNumber } =
 			req.body;
 
+		console.log("🔵 Complete KYC Request:", { userId, dateOfBirth });
+
 		const user = await User.findById(userId);
 		if (!user) {
 			return res.status(404).json({ error: "User not found" });
@@ -495,6 +492,7 @@ export const completeKYC = async (req, res) => {
 		// Initialize KYC object
 		user.kyc = user.kyc || {};
 		user.kyc.address = user.kyc.address || {};
+		user.kyc.identification = user.kyc.identification || {};
 
 		let verificationResults = {
 			ninVerified: false,
@@ -516,7 +514,12 @@ export const completeKYC = async (req, res) => {
 				verificationResults.ninVerified = true;
 				user.kyc.bvn = nin;
 				user.kyc.bvnVerified = true;
-				user.kyc.dateOfBirth = new Date(dateOfBirth);
+				// Update date of birth from NIN verification
+				if (ninResult.dateOfBirth) {
+					user.kyc.dateOfBirth = new Date(ninResult.dateOfBirth);
+				} else if (dateOfBirth) {
+					user.kyc.dateOfBirth = new Date(dateOfBirth);
+				}
 			}
 		}
 
@@ -533,6 +536,8 @@ export const completeKYC = async (req, res) => {
 				user.kyc.bvnVerified = true;
 				if (bvnResult.dateOfBirth) {
 					user.kyc.dateOfBirth = new Date(bvnResult.dateOfBirth);
+				} else if (dateOfBirth) {
+					user.kyc.dateOfBirth = new Date(dateOfBirth);
 				}
 				if (bvnResult.gender) {
 					user.kyc.gender = bvnResult.gender;
@@ -540,9 +545,17 @@ export const completeKYC = async (req, res) => {
 			}
 		}
 
-		// 3. Verify Address
+		// 3. If no verification was done but dateOfBirth is provided, save it
+		if (
+			dateOfBirth &&
+			!verificationResults.ninVerified &&
+			!verificationResults.bvnVerified
+		) {
+			user.kyc.dateOfBirth = new Date(dateOfBirth);
+		}
+
+		// 4. Verify Address
 		if (address?.street) {
-			// Address is already provided, mark as verified
 			verificationResults.addressVerified = true;
 			user.kyc.address = {
 				street: address.street,
@@ -553,16 +566,17 @@ export const completeKYC = async (req, res) => {
 			};
 		}
 
-		// 4. Verify ID
+		// 5. Verify ID
 		if (idType && idNumber) {
 			verificationResults.idVerified = true;
 			user.kyc.identification = {
 				type: idType,
 				number: idNumber,
+				imageUrl: user.kyc.identification?.imageUrl || "",
 			};
 		}
 
-		// 5. Set gender if provided
+		// 6. Set gender if provided
 		if (gender) {
 			user.kyc.gender = gender;
 		}
@@ -576,10 +590,22 @@ export const completeKYC = async (req, res) => {
 		user.kyc.isVerified = hasRequiredKYC;
 		user.kyc.verifiedAt = hasRequiredKYC ? new Date() : null;
 
+		// Also check if we have enough data for basic KYC completion
+		const hasBasicKYC =
+			!!user.kyc.bvn &&
+			!!user.kyc.dateOfBirth &&
+			!!user.kyc.address?.street &&
+			!!user.kyc.address?.city &&
+			!!user.kyc.address?.state &&
+			!!user.kyc.identification?.type &&
+			!!user.kyc.identification?.number;
+
+		user.kyc.isComplete = hasBasicKYC || hasRequiredKYC;
+
 		await user.save();
 
 		// Create virtual account and register with Bridgecard if KYC is complete
-		if (hasRequiredKYC) {
+		if (hasRequiredKYC || hasBasicKYC) {
 			await createVirtualAccountForUser(userId);
 			await registerWithBridgecard(userId);
 		}
@@ -588,9 +614,12 @@ export const completeKYC = async (req, res) => {
 			success: true,
 			kyc: {
 				isVerified: user.kyc.isVerified,
-				isComplete: hasRequiredKYC,
+				isComplete: user.kyc.isComplete,
 				verificationResults,
 				verifiedAt: user.kyc.verifiedAt,
+				dateOfBirth: user.kyc.dateOfBirth
+					? user.kyc.dateOfBirth.toISOString().split("T")[0]
+					: null,
 			},
 		});
 	} catch (error) {
@@ -701,146 +730,161 @@ export const updateKYC = async (req, res) => {
 		const userId = req.user._id;
 		const { bvn, dateOfBirth, gender, address, identification } = req.body;
 
-		console.log("🔵 KYC Update Request Started with Anchor");
+		console.log("🔵 KYC Update Request Started");
 		console.log("User ID:", userId);
+		console.log("📤 Received data:", { bvn, dateOfBirth, gender, address });
 
 		const user = await User.findById(userId);
 		if (!user) {
 			return res.status(404).json({ error: "User not found" });
 		}
 
-		// Ensure Anchor customer exists (Tier 0)
-		const anchorCustomerResult = await getOrCreateAnchorCustomer(userId);
-		if (!anchorCustomerResult.success) {
-			return res.status(400).json({
-				error: "Failed to initialize banking profile",
-				message: anchorCustomerResult.error,
-			});
+		// Initialize KYC if it doesn't exist
+		if (!user.kyc) {
+			user.kyc = {};
+		}
+		if (!user.kyc.address) {
+			user.kyc.address = {};
+		}
+		if (!user.kyc.identification) {
+			user.kyc.identification = {};
 		}
 
-		// Check current KYC level from Anchor
-		const kycStatus = await getCustomerKYCStatus(userId);
+		// Update KYC fields if provided
+		let kycUpdated = false;
 
-		// If already at Tier 1 or higher
-		if (
-			kycStatus.isVerified ||
-			kycStatus.kycLevel === "TIER_1" ||
-			kycStatus.kycLevel === "TIER_2"
-		) {
-			// Update user record
+		// Update BVN
+		if (bvn) {
+			user.kyc.bvn = bvn;
+			kycUpdated = true;
+		}
+
+		// Update Date of Birth - CRITICAL FIX
+		if (dateOfBirth) {
+			try {
+				const dobDate = new Date(dateOfBirth);
+				if (!isNaN(dobDate.getTime())) {
+					user.kyc.dateOfBirth = dobDate;
+					kycUpdated = true;
+					console.log("✅ Date of Birth updated to:", dobDate);
+				} else {
+					console.log("⚠️ Invalid date format:", dateOfBirth);
+				}
+			} catch (err) {
+				console.log("⚠️ Error parsing date:", err);
+			}
+		}
+
+		// Update Gender
+		if (gender) {
+			user.kyc.gender = gender;
+			kycUpdated = true;
+		}
+
+		// Update Address
+		if (address) {
+			if (address.street) {
+				user.kyc.address.street = address.street;
+				kycUpdated = true;
+			}
+			if (address.city) {
+				user.kyc.address.city = address.city;
+				kycUpdated = true;
+			}
+			if (address.state) {
+				user.kyc.address.state = address.state;
+				kycUpdated = true;
+			}
+			if (address.country) {
+				user.kyc.address.country = address.country;
+				kycUpdated = true;
+			}
+			if (address.postalCode) {
+				user.kyc.address.postalCode = address.postalCode;
+				kycUpdated = true;
+			}
+		}
+
+		// Update Identification
+		if (identification) {
+			if (identification.type) {
+				user.kyc.identification.type = identification.type;
+				kycUpdated = true;
+			}
+			if (identification.number) {
+				user.kyc.identification.number = identification.number;
+				kycUpdated = true;
+			}
+			if (identification.imageUrl) {
+				user.kyc.identification.imageUrl = identification.imageUrl;
+				kycUpdated = true;
+			}
+		}
+
+		// Check if KYC is complete
+		const isKYCComplete =
+			!!user.kyc.bvn &&
+			!!user.kyc.dateOfBirth &&
+			!!user.kyc.address?.street &&
+			!!user.kyc.address?.city &&
+			!!user.kyc.address?.state &&
+			!!user.kyc.identification?.type &&
+			!!user.kyc.identification?.number;
+
+		if (isKYCComplete) {
+			user.kyc.isComplete = true;
 			user.kyc.isVerified = true;
 			user.kyc.verifiedAt = new Date();
-			if (bvn) user.kyc.bvn = bvn;
-			if (dateOfBirth) user.kyc.dateOfBirth = new Date(dateOfBirth);
-			if (gender) user.kyc.gender = gender;
+		} else {
+			user.kyc.isComplete = false;
+		}
+
+		// Save user changes
+		if (kycUpdated || isKYCComplete) {
 			await user.save();
-
-			// ✅ Create virtual account for the user if they don't have one
-			await createVirtualAccountForUser(userId);
-
-			return res.status(200).json({
-				success: true,
-				message: "KYC already verified",
-				kyc: {
-					isVerified: true,
-					level: kycStatus.kycLevel,
-				},
+			console.log("✅ User KYC updated successfully");
+			console.log("📊 Current KYC state:", {
+				bvn: user.kyc.bvn,
+				dateOfBirth: user.kyc.dateOfBirth,
+				address: user.kyc.address,
+				identification: user.kyc.identification,
+				isComplete: user.kyc.isComplete,
+				isVerified: user.kyc.isVerified,
 			});
+		} else {
+			console.log("ℹ️ No KYC fields to update");
 		}
 
-		// Save basic KYC data first
-		if (address) {
-			user.kyc.address = {
-				street: address.street || user.kyc.address?.street,
-				city: address.city || user.kyc.address?.city,
-				state: address.state || user.kyc.address?.state,
-				country: address.country || "NG",
-				postalCode: address.postalCode || user.kyc.address?.postalCode,
-			};
-		}
-
-		if (identification) {
-			user.kyc.identification = {
-				type: identification.type || user.kyc.identification?.type,
-				number: identification.number || user.kyc.identification?.number,
-				imageUrl: identification.imageUrl || user.kyc.identification?.imageUrl,
-			};
-		}
-
-		// If BVN and DOB provided, upgrade to Tier 1
-		if (bvn && dateOfBirth && gender) {
-			console.log("🔵 Upgrading KYC to Tier 1 with Anchor...");
-
-			const upgradeResult = await upgradeCustomerToTier1(
-				userId,
-				bvn,
-				dateOfBirth,
-				gender,
-			);
-
-			if (!upgradeResult.success) {
-				// If already upgraded
-				if (upgradeResult.alreadyUpgraded) {
-					user.kyc.isVerified = true;
-					user.kyc.verifiedAt = new Date();
-					await user.save();
-
-					// ✅ Create virtual account
-					await createVirtualAccountForUser(userId);
-
-					return res.status(200).json({
-						success: true,
-						message: "KYC already verified",
-						kyc: {
-							isVerified: true,
-							isComplete: true,
-						},
-					});
-				}
-
-				return res.status(400).json({
-					error: "KYC upgrade failed",
-					message: upgradeResult.error,
-				});
-			}
-
-			// Save KYC data
-			user.kyc.bvn = bvn;
-			user.kyc.dateOfBirth = new Date(dateOfBirth);
-			user.kyc.gender = gender;
-			user.kyc.anchorVerificationId = upgradeResult.verificationId;
-			user.kyc.paystackValidationPending = true;
-
-			await user.save();
-
-			return res.status(202).json({
-				success: true,
-				pending: true,
-				message:
-					"KYC verification submitted. You will receive a notification when complete.",
-				kyc: {
-					isVerified: false,
-					isComplete: true,
-					pendingValidation: true,
-				},
-			});
-		}
-
-		// Just save partial KYC data
-		await user.save();
-
-		const isKYCComplete =
-			!!user.kyc.bvn && !!user.kyc.dateOfBirth && !!user.kyc.address?.street;
+		// Return KYC status
+		const kycStatus = {
+			isVerified: user.kyc.isVerified || false,
+			isComplete: isKYCComplete,
+			pendingValidation: user.kyc.pendingValidation || false,
+			hasBvn: !!user.kyc.bvn,
+			hasDateOfBirth: !!user.kyc.dateOfBirth,
+			hasAddress: !!(
+				user.kyc.address?.street &&
+				user.kyc.address?.city &&
+				user.kyc.address?.state
+			),
+			hasIdentification: !!(
+				user.kyc.identification?.type && user.kyc.identification?.number
+			),
+			verifiedAt: user.kyc.verifiedAt || null,
+			// Include the actual values for frontend display
+			bvn: user.kyc.bvn,
+			dateOfBirth: user.kyc.dateOfBirth,
+			gender: user.kyc.gender,
+			address: user.kyc.address,
+			identification: user.kyc.identification,
+		};
 
 		return res.status(200).json({
 			success: true,
-			message: "KYC data saved",
-			pending: false,
-			kyc: {
-				isVerified: user.kyc.isVerified,
-				isComplete: isKYCComplete,
-				pendingValidation: false,
-			},
+			message: isKYCComplete
+				? "KYC completed successfully"
+				: "KYC data updated",
+			kyc: kycStatus,
 		});
 	} catch (err) {
 		console.error("❌ Update KYC error:", err);
@@ -850,7 +894,6 @@ export const updateKYC = async (req, res) => {
 		});
 	}
 };
-
 /**
  * Helper function to create virtual account for user
  */
@@ -1045,6 +1088,10 @@ export const getKYCStatus = async (req, res) => {
 		const user = await User.findById(userId);
 		if (!user) return res.status(404).json({ error: "User not found" });
 
+		console.log("📊 Fetching KYC status for user:", userId);
+		console.log("📊 User KYC data:", user.kyc);
+
+		// Check if KYC is complete
 		const isKYCComplete =
 			!!user.kyc?.bvn &&
 			!!user.kyc?.dateOfBirth &&
@@ -1054,24 +1101,36 @@ export const getKYCStatus = async (req, res) => {
 			!!user.kyc?.identification?.type &&
 			!!user.kyc?.identification?.number;
 
+		const kycStatus = {
+			isVerified: user.kyc?.isVerified || false,
+			isComplete: isKYCComplete,
+			pendingValidation: user.kyc?.pendingValidation || false,
+			hasBvn: !!user.kyc?.bvn,
+			hasDateOfBirth: !!user.kyc?.dateOfBirth,
+			hasAddress: !!(
+				user.kyc?.address?.street &&
+				user.kyc?.address?.city &&
+				user.kyc?.address?.state
+			),
+			hasIdentification: !!(
+				user.kyc?.identification?.type && user.kyc?.identification?.number
+			),
+			verifiedAt: user.kyc?.verifiedAt || null,
+			// Include actual values for frontend
+			bvn: user.kyc?.bvn || undefined,
+			dateOfBirth: user.kyc?.dateOfBirth
+				? user.kyc.dateOfBirth.toISOString().split("T")[0]
+				: undefined,
+			gender: user.kyc?.gender || undefined,
+			address: user.kyc?.address || {},
+			identification: user.kyc?.identification || {},
+		};
+
+		console.log("📊 Returning KYC status:", kycStatus);
+
 		res.status(200).json({
 			success: true,
-			kyc: {
-				isVerified: user.kyc?.isVerified || false,
-				isComplete: isKYCComplete,
-				pendingValidation: user.kyc?.paystackValidationPending || false,
-				hasBvn: !!user.kyc?.bvn,
-				hasDateOfBirth: !!user.kyc?.dateOfBirth,
-				hasAddress: !!(
-					user.kyc?.address?.street &&
-					user.kyc?.address?.city &&
-					user.kyc?.address?.state
-				),
-				hasIdentification: !!(
-					user.kyc?.identification?.type && user.kyc?.identification?.number
-				),
-				verifiedAt: user.kyc?.verifiedAt || null,
-			},
+			kyc: kycStatus,
 		});
 	} catch (err) {
 		console.error("Get KYC status error:", err);
