@@ -562,29 +562,122 @@ export const getDepositAccountBalance = async (depositAccountId) => {
  * Get account number for a deposit account
  * ✅ NEW METHOD: /api/v1/account-numbers?AccountId={depositAccountId}
  */
+// In anchorService.js
+
+// backend/services/anchorService.js
+
 export const getAccountNumberForDeposit = async (depositAccountId) => {
 	try {
 		console.log(
 			`🔍 Fetching account number for deposit account: ${depositAccountId}`,
 		);
 
-		// ✅ CORRECT ENDPOINT: /account-numbers?AccountId={depositAccountId}
+		// ✅ Use the include parameter to get full account number details
 		const response = await makeAnchorRequest(
 			"get",
-			`/account-numbers?AccountId=${depositAccountId}`,
+			`/accounts/${depositAccountId}?include=AccountNumber,VirtualNuban`,
 		);
 
-		console.log("📥 Get account number response:", response.data);
+		console.log(
+			"📥 Get account number response:",
+			JSON.stringify(response.data, null, 2),
+		);
 
-		if (response.data?.data && response.data.data.length > 0) {
-			const accountNumberData = response.data.data[0];
-			const attributes = accountNumberData.attributes || {};
+		if (response.data?.data) {
+			const account = response.data.data;
+			const attributes = account.attributes || {};
+
+			// ✅ Extract bank details from the account attributes
+			let accountNumber = attributes.accountNumber;
+			let bankName = "Anchor Bank";
+			let bankCode = "000";
+			let accountName = attributes.accountName || "Kuditrak User";
+			let currency = attributes.currency || "NGN";
+			let status = attributes.status || "ACTIVE";
+
+			// ✅ Look for the full account number in the included data
+			const included = response.data.included || [];
+
+			for (const item of included) {
+				if (item.type === "AccountNumber" || item.type === "VirtualNuban") {
+					const itemAttributes = item.attributes || {};
+
+					// ✅ Get the full account number (not masked)
+					if (
+						itemAttributes.accountNumber &&
+						itemAttributes.accountNumber !== "******6644"
+					) {
+						accountNumber = itemAttributes.accountNumber;
+					}
+
+					// ✅ Get the bank details from the AccountNumber object
+					if (itemAttributes.bank) {
+						const bank = itemAttributes.bank;
+						if (bank.name) {
+							bankName = bank.name;
+						}
+						if (bank.code || bank.nipCode) {
+							bankCode = bank.code || bank.nipCode;
+						}
+					}
+
+					// ✅ Get the account name from the AccountNumber object
+					if (itemAttributes.name) {
+						accountName = itemAttributes.name;
+					}
+
+					// ✅ Get currency and status
+					if (itemAttributes.currency) {
+						currency = itemAttributes.currency;
+					}
+					if (itemAttributes.status) {
+						status = itemAttributes.status;
+					}
+
+					break;
+				}
+			}
+
+			// ✅ If bank details are in the deposit account attributes, use those
+			if (!bankName || bankName === "Anchor Bank") {
+				if (attributes.bank) {
+					const bank = attributes.bank;
+					if (bank.name) {
+						bankName = bank.name;
+					}
+					if (bank.code || bank.nipCode) {
+						bankCode = bank.code || bank.nipCode;
+					}
+				}
+			}
+
+			// ✅ Ensure we have the full account number
+			if (!accountNumber || accountNumber.includes("*")) {
+				// Try to get from attributes if still masked
+				if (
+					attributes.accountNumber &&
+					!attributes.accountNumber.includes("*")
+				) {
+					accountNumber = attributes.accountNumber;
+				}
+			}
+
+			console.log(`✅ Account details extracted:`);
+			console.log(`   Account Number: ${accountNumber}`);
+			console.log(`   Bank Name: ${bankName}`);
+			console.log(`   Bank Code: ${bankCode}`);
+			console.log(`   Account Name: ${accountName}`);
+			console.log(`   Currency: ${currency}`);
+			console.log(`   Status: ${status}`);
+
 			return {
 				success: true,
-				accountNumber: attributes.accountNumber || attributes.number,
-				bankName: attributes.bankName || "Anchor Bank",
-				accountName: attributes.accountName,
-				bankCode: attributes.bankCode || "000",
+				accountNumber: accountNumber,
+				bankName: bankName,
+				bankCode: bankCode,
+				accountName: accountName,
+				currency: currency,
+				status: status,
 			};
 		}
 
