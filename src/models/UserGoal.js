@@ -40,7 +40,23 @@ const userGoalSchema = new mongoose.Schema({
 		type: String,
 		default: "#4F46E5",
 	},
-	subAccountId: {
+	// ✅ This will store the Anchor Deposit Account ID for this goal
+	goalDepositAccountId: {
+		type: String,
+		default: null,
+		index: true,
+	},
+	// ✅ Store the account number for this goal
+	goalAccountNumber: {
+		type: String,
+		default: null,
+	},
+	// ✅ Store the bank details for this goal
+	goalBankName: {
+		type: String,
+		default: null,
+	},
+	goalBankCode: {
 		type: String,
 		default: null,
 	},
@@ -77,6 +93,12 @@ const userGoalSchema = new mongoose.Schema({
 			default: null,
 		},
 	},
+	// ✅ Track the status of the goal deposit account
+	goalAccountStatus: {
+		type: String,
+		enum: ["pending", "active", "closed"],
+		default: "pending",
+	},
 	createdAt: {
 		type: Date,
 		default: Date.now,
@@ -87,7 +109,6 @@ const userGoalSchema = new mongoose.Schema({
 	},
 });
 
-// ✅ Check if model already exists before compiling
 const UserGoal =
 	mongoose.models.UserGoal || mongoose.model("UserGoal", userGoalSchema);
 
