@@ -555,6 +555,8 @@ export const createWallet = async (req, res) => {
 
 // ==================== WALLET BALANCE ====================
 
+// backend/controllers/anchorWalletController.js - Update getBalance
+
 export const getBalance = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -586,13 +588,21 @@ export const getBalance = async (req, res) => {
 			!wallet.walletId.startsWith("local_")
 		) {
 			try {
-				const balanceResponse = await anchorService.getDepositAccountBalance(
+				// ✅ Use the new wallet balance endpoint
+				const balanceResponse = await anchorService.getWalletBalance(
 					wallet.walletId,
 				);
 				if (balanceResponse.success) {
 					balance = balanceResponse.balance;
 					wallet.balance = balance;
 					await wallet.save();
+					console.log(`✅ Balance synced from Anchor: ${balance}`);
+				} else {
+					console.log(
+						"⚠️ Could not fetch real-time balance:",
+						balanceResponse.error,
+					);
+					balance = wallet.balance;
 				}
 			} catch (err) {
 				console.log("⚠️ Could not fetch real-time balance:", err.message);

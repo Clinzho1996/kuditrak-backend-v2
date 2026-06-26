@@ -1,4 +1,4 @@
-// backend/services/anchorService.js - Complete version with all methods
+// backend/services/anchorService.js - Fixed with correct endpoints
 
 import axios from "axios";
 import crypto from "crypto";
@@ -214,6 +214,7 @@ export const createAnchorCustomerWithKYC = async (userData) => {
 
 /**
  * Upgrade customer KYC from Tier 0 to Tier 1
+ * ✅ FIXED: Use the correct verification endpoint
  */
 export const upgradeCustomerKYC = async (
 	customerId,
@@ -346,7 +347,6 @@ export const updateCustomer = async (customerId, updateData) => {
 
 /**
  * Create a deposit account (main wallet) for a customer
- * This is the foundation of your wallet system
  */
 export const createDepositAccount = async (
 	customerId,
@@ -415,7 +415,6 @@ export const createDepositAccount = async (
 
 /**
  * Get all deposit accounts for a customer
- * ✅ NEW METHOD - Required for syncing accounts
  */
 export const getDepositAccounts = async (customerId) => {
 	try {
@@ -462,7 +461,6 @@ export const getDepositAccounts = async (customerId) => {
 
 /**
  * Get a single deposit account by ID
- * ✅ NEW METHOD - Required for refreshing account details
  */
 export const getDepositAccount = async (accountId) => {
 	try {
@@ -508,21 +506,40 @@ export const getDepositAccount = async (accountId) => {
 
 /**
  * Get deposit account balance
+ * ✅ FIXED: Use the correct wallet balance endpoint
  */
 export const getDepositAccountBalance = async (depositAccountId) => {
 	try {
+		// ✅ CORRECT ENDPOINT: /wallet-balances instead of /deposit-accounts/:id/balance
 		const response = await makeAnchorRequest(
 			"get",
-			`/deposit-accounts/${depositAccountId}/balance`,
+			`/wallet-balances?walletId=${depositAccountId}`,
 		);
 
-		if (response.data?.data) {
-			const attributes = response.data.data.attributes || {};
+		if (response.data?.data && response.data.data.length > 0) {
+			const balanceData = response.data.data[0];
+			const attributes = balanceData.attributes || {};
 			return {
 				success: true,
 				balance: attributes.balance || 0,
 				currency: attributes.currency || "NGN",
+				availableBalance:
+					attributes.availableBalance || attributes.balance || 0,
 			};
+		}
+
+		// Fallback: Try getting balance from deposit account
+		try {
+			const accountResponse = await getDepositAccount(depositAccountId);
+			if (accountResponse.success && accountResponse.account) {
+				return {
+					success: true,
+					balance: accountResponse.account.balance || 0,
+					currency: accountResponse.account.currency || "NGN",
+				};
+			}
+		} catch (fallbackError) {
+			console.log("⚠️ Fallback balance fetch failed:", fallbackError.message);
 		}
 
 		return {
@@ -530,13 +547,13 @@ export const getDepositAccountBalance = async (depositAccountId) => {
 			error: "Failed to fetch balance",
 		};
 	} catch (error) {
+		console.error("❌ Get deposit account balance error:", error);
 		return handleAnchorError(error);
 	}
 };
 
 /**
  * Get account transactions
- * ✅ NEW METHOD - For fetching transaction history
  */
 export const getAccountTransactions = async (
 	accountId,
@@ -598,7 +615,6 @@ export const getAccountTransactions = async (
 
 /**
  * Create a virtual NUBAN for wallet funding via bank transfer
- * This is what you use for wallet top-up accounts
  */
 export const createVirtualNuban = async (depositAccountId, metadata = {}) => {
 	try {
@@ -699,7 +715,6 @@ export const getVirtualNubans = async (depositAccountId) => {
 
 /**
  * Get account number from deposit account
- * ✅ NEW METHOD - For getting the actual account number
  */
 export const getAccountNumber = async (depositAccountId) => {
 	try {
@@ -738,6 +753,43 @@ export const getAccountNumber = async (depositAccountId) => {
 		};
 	} catch (error) {
 		console.error("❌ Get account number error:", error);
+		return handleAnchorError(error);
+	}
+};
+
+// ==================== WALLET BALANCES (NEW ENDPOINT) ====================
+
+/**
+ * Get wallet balance using the correct endpoint
+ * ✅ NEW METHOD - Uses /wallet-balances endpoint
+ */
+export const getWalletBalance = async (walletId) => {
+	try {
+		console.log(`🔍 Fetching wallet balance for: ${walletId}`);
+
+		const response = await makeAnchorRequest(
+			"get",
+			`/wallet-balances?walletId=${walletId}`,
+		);
+
+		if (response.data?.data && response.data.data.length > 0) {
+			const balanceData = response.data.data[0];
+			const attributes = balanceData.attributes || {};
+			return {
+				success: true,
+				balance: attributes.balance || 0,
+				currency: attributes.currency || "NGN",
+				availableBalance:
+					attributes.availableBalance || attributes.balance || 0,
+			};
+		}
+
+		return {
+			success: false,
+			error: "No balance data found",
+		};
+	} catch (error) {
+		console.error("❌ Get wallet balance error:", error);
 		return handleAnchorError(error);
 	}
 };
@@ -783,6 +835,7 @@ export default {
 	getDepositAccountBalance,
 	getAccountTransactions,
 	getAccountNumber,
+	getWalletBalance, // ✅ New method
 
 	// Virtual NUBAN (Top-up accounts)
 	createVirtualNuban,
