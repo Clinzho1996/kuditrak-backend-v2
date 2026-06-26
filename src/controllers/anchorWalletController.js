@@ -1196,7 +1196,7 @@ export const createVirtualAccount = async (req, res) => {
 		const bankCode = accountNumberResponse.bankCode; // This is the REAL bank code from Anchor
 		const accountName =
 			accountNumberResponse.accountName || user.fullName || "Kuditrak User";
-		const currency = accountNumberResponse.currency || "NGN";
+
 		const status = accountNumberResponse.status || "ACTIVE";
 
 		console.log(`✅ Account details retrieved from Anchor:`);
