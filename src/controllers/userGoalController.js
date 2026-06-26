@@ -1,5 +1,4 @@
 // backend/controllers/userGoalController.js
-import mongoose from "mongoose";
 import cron from "node-cron";
 import AllocationRecord from "../models/AllocationRecord.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
@@ -143,25 +142,40 @@ const getMainWallet = async (userId) => {
 		throw error;
 	}
 };
-// backend/controllers/userGoalController.js - FIXED createGoalDepositAccount
+
+/**
+ * ✅ Create a Deposit Account in Anchor for a specific goal
+ */
 
 const createGoalDepositAccount = async (userId, goal) => {
 	try {
-		console.log(`🏦 Creating deposit account for goal: ${goal.name}`);
-		console.log(`   Goal ID: ${goal._id}`);
+		// ✅ First check if the goal already has an account
+		const existing = await checkGoalAccountExists(userId, goal);
+		if (existing.exists && existing.accountId) {
+			console.log(`✅ Using existing goal account: ${existing.accountId}`);
+			goal.goalDepositAccountId = existing.accountId;
+			goal.goalAccountStatus = "active";
+			await goal.save();
+			return {
+				success: true,
+				goalAccountId: existing.accountId,
+				wasExisting: true,
+			};
+		}
+
+		console.log(`🏦 Creating NEW deposit account for goal: ${goal.name}`);
 
 		const user = await getUserWithAnchorData(userId);
-		if (!user) {
-			throw new Error("User not found");
-		}
-
 		const anchorCustomer = await getOrCreateAnchorCustomer(userId);
 		if (!anchorCustomer.success) {
-			throw new Error("Failed to get Anchor customer: " + anchorCustomer.error);
+			throw new Error("Failed to get Anchor customer");
 		}
 
-		// Create account in Anchor
-		console.log("📝 Creating deposit account in Anchor...");
+		if (!user.anchorCustomerId) {
+			user.anchorCustomerId = anchorCustomer.customerId;
+			user.anchorCustomerStatus = "active";
+			await user.save();
+		}
 
 		const accountResponse = await anchorService.createDepositAccount(
 			anchorCustomer.customerId,
@@ -175,225 +189,92 @@ const createGoalDepositAccount = async (userId, goal) => {
 				type: "goal",
 				userEmail: user.email,
 				userName: user.fullName,
-				created_at: new Date().toISOString(),
 			},
 		);
 
 		if (!accountResponse.success) {
 			throw new Error(
-				"Failed to create goal deposit account: " +
-					(accountResponse.error || "Unknown error"),
+				"Failed to create goal deposit account: " + accountResponse.error,
 			);
 		}
 
 		const goalAccountId = accountResponse.accountId;
 		console.log(`✅ Goal deposit account created: ${goalAccountId}`);
 
-		// Get account number
-		console.log("🔍 Fetching account number...");
+		const accountNumberResponse =
+			await anchorService.getAccountNumberForDeposit(goalAccountId);
 
 		let accountNumber = null;
-		let bankName = "PROVIDUS BANK";
-		let bankCode = "000023";
+		let bankName = null;
+		let bankCode = null;
 
-		try {
-			const accountNumberResponse =
-				await anchorService.getAccountNumberForDeposit(goalAccountId);
-			if (accountNumberResponse.success) {
-				accountNumber = accountNumberResponse.accountNumber;
-				bankName = accountNumberResponse.bankName || bankName;
-				bankCode = accountNumberResponse.bankCode || bankCode;
-				console.log(`✅ Goal account number: ${accountNumber}`);
-				console.log(`   Bank: ${bankName} (${bankCode})`);
-			}
-		} catch (err) {
-			console.warn("⚠️ Could not get account number:", err.message);
+		if (accountNumberResponse.success) {
+			accountNumber = accountNumberResponse.accountNumber;
+			bankName = accountNumberResponse.bankName;
+			bankCode = accountNumberResponse.bankCode;
+			console.log(`✅ Goal account number: ${accountNumber} (${bankName})`);
 		}
 
-		// ✅ DIRECT MONGODB UPDATE - THIS WORKS!
-		console.log("💾 Updating goal directly in MongoDB...");
+		// ✅ Update the goal with the deposit account details
+		goal.goalDepositAccountId = goalAccountId;
+		goal.goalAccountNumber = accountNumber;
+		goal.goalBankName = bankName;
+		goal.goalBankCode = bankCode;
+		goal.goalAccountStatus = "active";
+		await goal.save();
 
-		const db = mongoose.connection.db;
-		const collection = db.collection("usergoals");
-
-		const updateResult = await collection.updateOne(
-			{ _id: goal._id },
-			{
-				$set: {
-					goalDepositAccountId: goalAccountId,
-					goalAccountNumber: accountNumber,
-					goalBankName: bankName,
-					goalBankCode: bankCode,
-					goalAccountStatus: "active",
-					goalAccountBalance: 0,
-					updatedAt: new Date(),
-				},
-			},
-		);
-
-		console.log(`Direct update result: ${updateResult.modifiedCount} modified`);
-
-		if (updateResult.modifiedCount === 0) {
-			// Try with mongoose if direct update failed
-			console.log("⚠️ Direct update failed, trying mongoose...");
-
-			const updatedGoal = await UserGoal.findByIdAndUpdate(
-				goal._id,
-				{
-					$set: {
-						goalDepositAccountId: goalAccountId,
-						goalAccountNumber: accountNumber,
-						goalBankName: bankName,
-						goalBankCode: bankCode,
-						goalAccountStatus: "active",
-						goalAccountBalance: 0,
-						updatedAt: new Date(),
-					},
-				},
-				{
-					new: true,
-					returnDocument: "after",
-				},
-			);
-
-			if (updatedGoal) {
-				console.log(
-					`✅ Goal updated via mongoose: ${updatedGoal.goalDepositAccountId}`,
-				);
-				goal.goalDepositAccountId = updatedGoal.goalDepositAccountId;
-				goal.goalAccountNumber = updatedGoal.goalAccountNumber;
-				goal.goalBankName = updatedGoal.goalBankName;
-				goal.goalBankCode = updatedGoal.goalBankCode;
-
-				return {
-					success: true,
-					goalAccountId: updatedGoal.goalDepositAccountId,
-					accountNumber: updatedGoal.goalAccountNumber,
-					bankName: updatedGoal.goalBankName,
-					bankCode: updatedGoal.goalBankCode,
-					wasExisting: false,
-				};
-			}
-		}
-
-		// ✅ VERIFY the update worked
-		const verifiedGoal = await UserGoal.findById(goal._id);
-		if (verifiedGoal) {
-			console.log(`✅ Verified goal: ${verifiedGoal._id}`);
-			console.log(
-				`   goalDepositAccountId: ${verifiedGoal.goalDepositAccountId}`,
-			);
-			console.log(`   goalAccountNumber: ${verifiedGoal.goalAccountNumber}`);
-			console.log(`   goalBankName: ${verifiedGoal.goalBankName}`);
-
-			if (verifiedGoal.goalDepositAccountId) {
-				// ✅ Update the original goal reference
-				goal.goalDepositAccountId = verifiedGoal.goalDepositAccountId;
-				goal.goalAccountNumber = verifiedGoal.goalAccountNumber;
-				goal.goalBankName = verifiedGoal.goalBankName;
-				goal.goalBankCode = verifiedGoal.goalBankCode;
-				goal.goalAccountStatus = verifiedGoal.goalAccountStatus;
-
-				console.log(
-					`✅ SUCCESS: Goal account ID is now ${verifiedGoal.goalDepositAccountId}`,
-				);
-				return {
-					success: true,
-					goalAccountId: verifiedGoal.goalDepositAccountId,
-					accountNumber: verifiedGoal.goalAccountNumber,
-					bankName: verifiedGoal.goalBankName,
-					bankCode: verifiedGoal.goalBankCode,
-					wasExisting: false,
-				};
-			}
-		}
-
-		console.error("❌ CRITICAL: Goal account ID still not saved!");
-		console.error("   Goal ID:", goal._id);
-		console.error("   Account ID:", goalAccountId);
-		throw new Error("Failed to save goal account ID to database");
+		return {
+			success: true,
+			goalAccountId: goalAccountId,
+			accountNumber: accountNumber,
+			bankName: bankName,
+			bankCode: bankCode,
+			wasExisting: false,
+		};
 	} catch (error) {
 		console.error("❌ createGoalDepositAccount error:", error);
 		throw error;
 	}
 };
 
-// backend/controllers/userGoalController.js - Complete transferToGoal
+// backend/controllers/userGoalController.js - FIXED transferToGoal
 
-/**
- * ✅ Transfer funds from main wallet to goal deposit account
- */
 const transferToGoal = async (userId, goal, amount) => {
 	try {
 		console.log(`💰 Transferring ₦${amount} to goal: ${goal.name}`);
 
-		// ✅ Get user with Anchor data
 		const user = await getUserWithAnchorData(userId);
-		if (!user) {
-			throw new Error("User not found");
-		}
 
-		// ✅ Get main wallet
 		const mainWallet = await getMainWallet(userId);
 		if (!mainWallet) {
 			throw new Error("Main wallet not found");
 		}
 
-		// ✅ CRITICAL: Always re-fetch the goal from database
-		let freshGoal = await UserGoal.findById(goal._id);
-		if (!freshGoal) {
-			throw new Error("Goal not found");
+		// ✅ Check if the goal already has a deposit account in the database
+		// Re-fetch the goal to ensure we have the latest data
+		const freshGoal = await UserGoal.findById(goal._id);
+
+		if (!freshGoal.goalDepositAccountId) {
+			console.log("🏦 Goal has no deposit account, creating one...");
+			await createGoalDepositAccount(userId, freshGoal);
+			// Re-fetch the goal after creating the account
+			const updatedGoal = await UserGoal.findById(goal._id);
+			goal.goalDepositAccountId = updatedGoal.goalDepositAccountId;
+			goal.goalAccountNumber = updatedGoal.goalAccountNumber;
+			goal.goalBankName = updatedGoal.goalBankName;
+			goal.goalBankCode = updatedGoal.goalBankCode;
+			goal.goalAccountStatus = updatedGoal.goalAccountStatus;
 		}
 
-		console.log(`📊 Fresh goal data:`);
-		console.log(`   Goal ID: ${freshGoal._id}`);
-		console.log(`   Account ID: ${freshGoal.goalDepositAccountId || "NULL"}`);
-		console.log(`   Account Number: ${freshGoal.goalAccountNumber || "NULL"}`);
-		console.log(`   Allocated: ₦${freshGoal.allocatedAmount}`);
-
-		let goalAccountId = freshGoal.goalDepositAccountId;
-
-		// ✅ If no account ID in DB, create one
-		if (!goalAccountId) {
-			console.log("🏦 Goal has no account ID, creating one...");
-
-			const createResult = await createGoalDepositAccount(userId, freshGoal);
-			if (!createResult.success) {
-				throw new Error(
-					"Failed to create goal deposit account: " +
-						(createResult.error || "Unknown error"),
-				);
-			}
-
-			// ✅ RE-FETCH the goal after creation
-			freshGoal = await UserGoal.findById(goal._id);
-			goalAccountId = freshGoal.goalDepositAccountId;
-
-			console.log(`✅ Goal account created and saved: ${goalAccountId}`);
-			console.log(`   Account Number: ${freshGoal.goalAccountNumber}`);
-			console.log(`   Bank: ${freshGoal.goalBankName}`);
-		}
-
-		// ✅ Double-check we have a valid goalAccountId
-		if (!goalAccountId) {
-			throw new Error(
-				"Failed to get or create goal account ID. Please try again.",
-			);
-		}
-
+		// ✅ Use the goal's deposit account ID
+		const goalAccountId = goal.goalDepositAccountId;
 		console.log(`✅ Using goal account: ${goalAccountId}`);
-		console.log(
-			`   Account Number: ${freshGoal.goalAccountNumber || "Not yet available"}`,
-		);
-		console.log(`   Bank: ${freshGoal.goalBankName || "Not yet available"}`);
 
-		// ✅ Verify user has Anchor customer ID
 		if (!user.anchorCustomerId) {
 			throw new Error("User does not have an Anchor customer ID");
 		}
 
-		// ✅ Get real balances from Anchor
-		console.log("🔍 Fetching main wallet balance from Anchor...");
+		// Get real balances from Anchor
 		const mainBalance = await anchorService.getWalletBalance(
 			mainWallet.walletId,
 		);
@@ -410,15 +291,12 @@ const transferToGoal = async (userId, goal, amount) => {
 			);
 		}
 
-		// ✅ Transfer using Anchor's /transfers endpoint
+		// Transfer using the correct /transfers endpoint
 		const amountInKobo = Math.round(amount * 100);
-		console.log(
-			`🔄 Transferring ${amountInKobo} kobo from main wallet to goal...`,
-		);
 
 		const transferResult = await anchorService.transferBetweenAccounts(
-			mainWallet.walletId, // Source: Main wallet
-			goalAccountId, // Destination: Goal's deposit account
+			mainWallet.walletId,
+			goalAccountId, // ✅ Use the existing goal account
 			amountInKobo,
 			"NGN",
 			`Transfer to goal: ${goal.name}`,
@@ -431,10 +309,8 @@ const transferToGoal = async (userId, goal, amount) => {
 		}
 
 		console.log(`✅ Transfer completed: ${transferResult.transferId}`);
-		console.log(`   Status: ${transferResult.status}`);
-		console.log(`   Reference: ${transferResult.reference}`);
 
-		// ✅ Update local balances after successful transfer
+		// Update local balances after successful transfer
 		const updatedMainBalance = await anchorService.getWalletBalance(
 			mainWallet.walletId,
 		);
@@ -447,20 +323,14 @@ const transferToGoal = async (userId, goal, amount) => {
 			console.log(`✅ Main wallet updated: ₦${mainWallet.balance}`);
 		}
 
-		// ✅ Update goal allocation
+		// ✅ Update goal allocation using the fresh goal
 		freshGoal.allocatedAmount += amount;
-		freshGoal.updatedAt = new Date();
 		await freshGoal.save();
 
 		// ✅ Update the original goal reference
 		goal.allocatedAmount = freshGoal.allocatedAmount;
-		goal.goalDepositAccountId = freshGoal.goalDepositAccountId;
-		goal.goalAccountNumber = freshGoal.goalAccountNumber;
-		goal.goalBankName = freshGoal.goalBankName;
-		goal.goalBankCode = freshGoal.goalBankCode;
-		goal.goalAccountStatus = freshGoal.goalAccountStatus;
 
-		// ✅ Create transaction record
+		// Create transaction record with Anchor transfer ID
 		await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: user.anchorCustomerId,
@@ -484,28 +354,23 @@ const transferToGoal = async (userId, goal, amount) => {
 				userName: user.fullName,
 				fromAccount: mainWallet.walletId,
 				toAccount: goalAccountId,
-				amountInKobo: amountInKobo,
 			},
 		});
 
 		console.log(`✅ Successfully transferred ₦${amount} to goal: ${goal.name}`);
 		console.log(`   Goal Account: ${goalAccountId}`);
 		console.log(`   Total Allocated: ₦${freshGoal.allocatedAmount}`);
-		console.log(
-			`   Remaining: ₦${goal.goalAmount - freshGoal.allocatedAmount}`,
-		);
 
 		return {
 			success: true,
 			transferId: transferResult.transferId,
-			allocatedAmount: freshGoal.allocatedAmount,
 		};
 	} catch (error) {
 		console.error("❌ transferToGoal error:", error);
-		console.error("   Stack:", error.stack);
 		throw error;
 	}
 };
+
 // backend/controllers/userGoalController.js - Add this helper
 
 /**
@@ -976,6 +841,9 @@ export const deleteGoal = async (req, res) => {
 	}
 };
 
+/**
+ * ✅ Allocate funds to goal - uses User model for validation
+ */
 export const allocateToGoal = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -994,8 +862,7 @@ export const allocateToGoal = async (req, res) => {
 			});
 		}
 
-		// ✅ Get the goal
-		let goal = await UserGoal.findOne({ _id: id, userId: req.user._id });
+		const goal = await UserGoal.findOne({ _id: id, userId: req.user._id });
 
 		if (!goal) {
 			return res.status(404).json({ error: "Goal not found" });
@@ -1008,11 +875,7 @@ export const allocateToGoal = async (req, res) => {
 			});
 		}
 
-		// ✅ Call transferToGoal with the goal
 		await transferToGoal(req.user._id, goal, amount);
-
-		// ✅ Re-fetch the goal to get updated data
-		goal = await UserGoal.findById(id);
 
 		const isCompleted = goal.allocatedAmount >= goal.goalAmount;
 
@@ -1029,7 +892,6 @@ export const allocateToGoal = async (req, res) => {
 				metadata: {
 					userEmail: user.email,
 					userName: user.fullName,
-					goalAccountId: goal.goalDepositAccountId,
 				},
 			});
 		} catch (recordError) {
