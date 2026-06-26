@@ -12,6 +12,7 @@ import {
 	getVirtualAccountDetails,
 	registerDeviceToken,
 	searchKuditrakUsers,
+	submitKYCToAnchor,
 	testPushNotification,
 	unregisterDeviceToken,
 	updateKYC,
@@ -57,6 +58,9 @@ router.post("/kyc/verify-drivers-license", protect, verifyDriversLicense);
 router.post("/kyc/verify-address", protect, verifyAddress);
 router.post("/kyc/verify-liveness", protect, verifyLiveness);
 router.post("/kyc/complete", protect, completeKYC);
+// backend/routes/userRoutes.js - Add this route
+
+router.post("/kyc/submit-to-anchor", protect, submitKYCToAnchor);
 
 // ==================== VIRTUAL ACCOUNT ROUTES ====================
 // Create virtual account (Anchor deposit account + virtual NUBAN)

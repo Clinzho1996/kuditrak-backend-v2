@@ -903,6 +903,8 @@ export const updateKYC = async (req, res) => {
  */
 // backend/controllers/userController.js - Replace createVirtualAccountForUser
 
+// backend/controllers/userController.js - Replace createVirtualAccountForUser
+
 /**
  * Helper function to create virtual account for user
  * ✅ REAL ANCHOR ONLY - No mock fallback
@@ -930,33 +932,23 @@ export const createVirtualAccountForUser = async (userId) => {
 		}
 
 		// Get Anchor customer
-		const anchorCustomer = await AnchorCustomer.findOne({ userId });
+		let anchorCustomer = await AnchorCustomer.findOne({ userId });
 		if (!anchorCustomer) {
 			console.log("❌ No Anchor customer found for user:", userId);
-			// Try to create one
 			const { getOrCreateAnchorCustomer } =
 				await import("../services/anchorCustomerService.js");
 			const result = await getOrCreateAnchorCustomer(userId);
 			if (!result.success) {
 				return { success: false, error: "Could not create Anchor customer" };
 			}
-			// Re-fetch the customer
-			const refreshedCustomer = await AnchorCustomer.findOne({ userId });
-			if (!refreshedCustomer) {
+			anchorCustomer = await AnchorCustomer.findOne({ userId });
+			if (!anchorCustomer) {
 				return { success: false, error: "Anchor customer creation failed" };
 			}
-			anchorCustomer = refreshedCustomer;
 		}
 
-		// Check KYC level - must be at least TIER_1
-		if (anchorCustomer.kycLevel === "TIER_0") {
-			console.log("⚠️ KYC not completed, skipping virtual account creation");
-			return {
-				success: false,
-				error: "KYC not completed",
-				requiresKYC: true,
-			};
-		}
+		console.log(`✅ Anchor customer found: ${anchorCustomer.anchorCustomerId}`);
+		console.log(`   Local KYC Level: ${anchorCustomer.kycLevel}`);
 
 		// Get user details
 		const user = await User.findById(userId);
@@ -964,38 +956,137 @@ export const createVirtualAccountForUser = async (userId) => {
 			return { success: false, error: "User not found" };
 		}
 
-		console.log("👤 User:", user.fullName, user.email);
+		// ✅ CRITICAL: Check if KYC needs to be upgraded in Anchor
+		if (anchorCustomer.kycLevel === "TIER_0") {
+			console.log("⚠️ KYC not completed in Anchor. Attempting to upgrade...");
 
-		// ✅ STEP 1: Create deposit account in Anchor
-		console.log("📝 Creating deposit account in Anchor...");
+			// Check if we have the required KYC data
+			const bvn = user.kyc?.bvn;
+			const dateOfBirth = user.kyc?.dateOfBirth;
+			const gender = user.kyc?.gender;
 
-		const accountResponse = await anchorService.createDepositAccount(
-			anchorCustomer.anchorCustomerId,
-			"SAVINGS",
-			{
-				userId: userId.toString(),
-				platform: "kuditrak",
-				currency: "NGN",
-				created_after_kyc: true,
-			},
-		);
+			if (!bvn || !dateOfBirth || !gender) {
+				console.log("❌ Missing KYC data:", {
+					bvn: !!bvn,
+					dateOfBirth: !!dateOfBirth,
+					gender: !!gender,
+				});
+				return {
+					success: false,
+					error: "KYC data incomplete. Please complete your KYC first.",
+					requiresKYC: true,
+				};
+			}
 
-		if (!accountResponse.success) {
-			console.error(
-				"❌ Failed to create deposit account:",
-				accountResponse.error,
+			// Format date for Anchor
+			const formattedDate =
+				dateOfBirth instanceof Date
+					? dateOfBirth.toISOString().split("T")[0]
+					: new Date(dateOfBirth).toISOString().split("T")[0];
+
+			console.log(
+				`📤 Upgrading KYC in Anchor: BVN=${bvn}, DOB=${formattedDate}, Gender=${gender}`,
 			);
+
+			// Upgrade KYC in Anchor
+			const upgradeResult = await anchorService.upgradeCustomerKYC(
+				anchorCustomer.anchorCustomerId,
+				bvn,
+				formattedDate,
+				gender,
+			);
+
+			if (!upgradeResult.success) {
+				console.error("❌ KYC upgrade failed:", upgradeResult.error);
+				return {
+					success: false,
+					error: upgradeResult.error || "Failed to upgrade KYC in Anchor",
+					requiresKYC: true,
+				};
+			}
+
+			console.log(`✅ KYC upgrade initiated: ${upgradeResult.verificationId}`);
+			console.log(`   Status: ${upgradeResult.status}`);
+
+			// Update local customer record
+			anchorCustomer.kycLevel = "TIER_1";
+			anchorCustomer.kycStatus = "pending";
+			anchorCustomer.currentVerificationId = upgradeResult.verificationId;
+			anchorCustomer.identificationLevel2 = { bvn, dateOfBirth, gender };
+			await anchorCustomer.save();
+
+			// Update user record
+			user.anchorKycLevel = "TIER_1";
+			user.kyc.anchorVerificationId = upgradeResult.verificationId;
+			user.kyc.paystackValidationPending = true;
+			await user.save();
+
+			// Return waiting status - KYC needs to be approved first
 			return {
 				success: false,
 				error:
-					accountResponse.error || "Failed to create deposit account in Anchor",
+					"KYC verification submitted. Please wait for approval before creating a virtual account.",
+				requiresKYC: true,
+				kycPending: true,
+				verificationId: upgradeResult.verificationId,
 			};
 		}
 
-		const depositAccountId = accountResponse.accountId;
-		console.log(`✅ Deposit account created: ${depositAccountId}`);
+		// ✅ KYC is already TIER_1 or higher, proceed with virtual account creation
+		console.log(
+			`✅ KYC Level ${anchorCustomer.kycLevel} - Proceeding with virtual account creation`,
+		);
 
-		// ✅ STEP 2: Create virtual NUBAN for the account
+		// ✅ STEP 1: Check if account already exists in Anchor
+		let depositAccountId = null;
+		try {
+			console.log("🔍 Checking for existing deposit accounts in Anchor...");
+			const accountsResponse = await anchorService.getDepositAccounts(
+				anchorCustomer.anchorCustomerId,
+			);
+
+			if (accountsResponse.success && accountsResponse.accounts?.length > 0) {
+				const existingAcc = accountsResponse.accounts[0];
+				depositAccountId = existingAcc.id || existingAcc.accountId;
+				console.log(`✅ Found existing deposit account: ${depositAccountId}`);
+			}
+		} catch (err) {
+			console.log("⚠️ Could not check existing accounts:", err.message);
+		}
+
+		// ✅ STEP 2: Create deposit account if none exists
+		if (!depositAccountId) {
+			console.log("📝 Creating new deposit account in Anchor...");
+
+			const accountResponse = await anchorService.createDepositAccount(
+				anchorCustomer.anchorCustomerId,
+				"SAVINGS",
+				{
+					userId: userId.toString(),
+					platform: "kuditrak",
+					currency: "NGN",
+					created_after_kyc: true,
+				},
+			);
+
+			if (!accountResponse.success) {
+				console.error(
+					"❌ Failed to create deposit account:",
+					accountResponse.error,
+				);
+				return {
+					success: false,
+					error:
+						accountResponse.error ||
+						"Failed to create deposit account in Anchor",
+				};
+			}
+
+			depositAccountId = accountResponse.accountId;
+			console.log(`✅ Deposit account created: ${depositAccountId}`);
+		}
+
+		// ✅ STEP 3: Create virtual NUBAN for the account
 		console.log("📝 Creating virtual NUBAN...");
 
 		const nubanResponse = await anchorService.createVirtualNuban(
@@ -1018,7 +1109,7 @@ export const createVirtualAccountForUser = async (userId) => {
 
 		console.log(`✅ Virtual NUBAN created: ${nubanResponse.accountNumber}`);
 
-		// ✅ STEP 3: Save to database
+		// ✅ STEP 4: Save to database
 		const virtualAccount = await AnchorVirtualAccount.create({
 			userId,
 			anchorCustomerId: anchorCustomer.anchorCustomerId,
@@ -1036,7 +1127,7 @@ export const createVirtualAccountForUser = async (userId) => {
 
 		console.log(`✅ Virtual account saved: ${virtualAccount.accountNumber}`);
 
-		// ✅ STEP 4: Update wallet with account number if exists
+		// ✅ STEP 5: Update wallet with account number if exists
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -1049,7 +1140,7 @@ export const createVirtualAccountForUser = async (userId) => {
 			console.log("✅ Wallet updated with account number");
 		}
 
-		// ✅ STEP 5: Send notification
+		// ✅ STEP 6: Send notification
 		try {
 			await sendPushToUser(
 				userId,
@@ -1079,6 +1170,106 @@ export const createVirtualAccountForUser = async (userId) => {
 	}
 };
 
+// backend/controllers/userController.js - Add this function
+
+/**
+ * Manually submit KYC to Anchor for verification
+ */
+export const submitKYCToAnchor = async (req, res) => {
+	try {
+		const userId = req.user._id;
+		console.log("🔵 Submitting KYC to Anchor for user:", userId);
+
+		const user = await User.findById(userId);
+		if (!user) {
+			return res.status(404).json({ success: false, error: "User not found" });
+		}
+
+		const anchorCustomer = await AnchorCustomer.findOne({ userId });
+		if (!anchorCustomer) {
+			return res.status(404).json({
+				success: false,
+				error: "Anchor customer not found. Please complete onboarding first.",
+			});
+		}
+
+		// Check if KYC is already TIER_1 or higher
+		if (anchorCustomer.kycLevel !== "TIER_0") {
+			return res.status(200).json({
+				success: true,
+				message: `KYC already at level ${anchorCustomer.kycLevel}`,
+				kyc: {
+					level: anchorCustomer.kycLevel,
+					status: anchorCustomer.kycStatus,
+				},
+			});
+		}
+
+		// Get KYC data from user
+		const bvn = user.kyc?.bvn;
+		const dateOfBirth = user.kyc?.dateOfBirth;
+		const gender = user.kyc?.gender;
+
+		if (!bvn || !dateOfBirth || !gender) {
+			return res.status(400).json({
+				success: false,
+				error: "Missing KYC data. Please complete your KYC first.",
+				missing: {
+					bvn: !bvn,
+					dateOfBirth: !dateOfBirth,
+					gender: !gender,
+				},
+			});
+		}
+
+		const formattedDate =
+			dateOfBirth instanceof Date
+				? dateOfBirth.toISOString().split("T")[0]
+				: new Date(dateOfBirth).toISOString().split("T")[0];
+
+		console.log(
+			`📤 Upgrading KYC in Anchor: BVN=${bvn}, DOB=${formattedDate}, Gender=${gender}`,
+		);
+
+		// Upgrade KYC in Anchor
+		const upgradeResult = await anchorService.upgradeCustomerKYC(
+			anchorCustomer.anchorCustomerId,
+			bvn,
+			formattedDate,
+			gender,
+		);
+
+		if (!upgradeResult.success) {
+			console.error("❌ KYC upgrade failed:", upgradeResult.error);
+			return res.status(400).json({
+				success: false,
+				error: upgradeResult.error || "Failed to upgrade KYC in Anchor",
+			});
+		}
+
+		// Update local records
+		anchorCustomer.kycLevel = "TIER_1";
+		anchorCustomer.kycStatus = "pending";
+		anchorCustomer.currentVerificationId = upgradeResult.verificationId;
+		anchorCustomer.identificationLevel2 = { bvn, dateOfBirth, gender };
+		await anchorCustomer.save();
+
+		user.anchorKycLevel = "TIER_1";
+		user.kyc.anchorVerificationId = upgradeResult.verificationId;
+		user.kyc.paystackValidationPending = true;
+		await user.save();
+
+		res.status(200).json({
+			success: true,
+			message: "KYC submitted to Anchor for verification",
+			verificationId: upgradeResult.verificationId,
+			status: upgradeResult.status,
+		});
+	} catch (error) {
+		console.error("Submit KYC to Anchor error:", error);
+		res.status(500).json({ error: error.message });
+	}
+};
 // backend/controllers/userController.js - Add this function
 
 export const getVirtualAccountDetails = async (req, res) => {
