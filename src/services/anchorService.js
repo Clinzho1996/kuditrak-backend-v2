@@ -613,9 +613,6 @@ export const getAccountTransactions = async (
 
 // ==================== VIRTUAL NUBAN (VIRTUAL ACCOUNTS) ====================
 
-/**
- * Create a virtual NUBAN for wallet funding via bank transfer
- */
 export const createVirtualNuban = async (depositAccountId, metadata = {}) => {
 	try {
 		const payload = {
@@ -628,7 +625,15 @@ export const createVirtualNuban = async (depositAccountId, metadata = {}) => {
 					},
 				},
 				relationships: {
+					// ✅ The deposit account this virtual NUBAN belongs to
 					depositAccount: {
+						data: {
+							id: depositAccountId,
+							type: "DepositAccount",
+						},
+					},
+					// ✅ CRITICAL: The settlement account where funds will be sent
+					settlementAccount: {
 						data: {
 							id: depositAccountId,
 							type: "DepositAccount",
