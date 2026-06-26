@@ -876,8 +876,11 @@ export const transferBetweenAccounts = async (
 			`🔄 Transferring ${amount} kobo from ${fromAccountId} to ${toAccountId}`,
 		);
 
-		// ✅ Use the correct endpoint: /transfers (not /transactions)
-		// ✅ Use the correct payload structure from Anchor docs
+		// ✅ Generate a valid reference (only lowercase, numbers, underscores, hyphens)
+		const timestamp = Date.now();
+		const randomStr = Math.random().toString(36).substring(2, 8); // lowercase only
+		const reference = `trf_${timestamp}_${randomStr}`; // ✅ all lowercase
+
 		const payload = {
 			data: {
 				type: "BookTransfer",
@@ -885,7 +888,7 @@ export const transferBetweenAccounts = async (
 					amount: amount,
 					currency: currency,
 					reason: reason,
-					reference: `TRF_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+					reference: reference, // ✅ Valid format: "trf_1782483631730_k18hod"
 				},
 				relationships: {
 					account: {
@@ -906,7 +909,6 @@ export const transferBetweenAccounts = async (
 
 		console.log("📝 Transfer payload:", JSON.stringify(payload, null, 2));
 
-		// ✅ Correct endpoint: /api/v1/transfers
 		const response = await makeAnchorRequest("post", "/transfers", payload);
 
 		if (response.data?.data) {
@@ -937,7 +939,6 @@ export const transferBetweenAccounts = async (
 			console.error("Status:", error.response.status);
 			console.error("Data:", JSON.stringify(error.response.data, null, 2));
 
-			// Check for specific error cases
 			const errors = error.response.data?.errors || [];
 			for (const err of errors) {
 				if (err.detail?.includes("INSUFFICIENT_BALANCE")) {
