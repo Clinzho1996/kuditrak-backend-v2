@@ -1,4 +1,5 @@
 // backend/controllers/userGoalController.js
+import mongoose from "mongoose";
 import cron from "node-cron";
 import AllocationRecord from "../models/AllocationRecord.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
