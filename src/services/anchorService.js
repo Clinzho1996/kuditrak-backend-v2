@@ -864,6 +864,160 @@ export const verifyWebhookSignature = (payload, signature, timestamp) => {
 	}
 };
 
+// backend/services/anchorService.js - Add this method
+
+/**
+ * ✅ Transfer between two deposit accounts (internal transfer)
+ */
+export const transferBetweenAccounts = async (
+	fromAccountId,
+	toAccountId,
+	amount,
+	currency = "NGN",
+	narration = "Transfer",
+) => {
+	try {
+		console.log(
+			`🔄 Transferring ₦${amount} from ${fromAccountId} to ${toAccountId}`,
+		);
+
+		const payload = {
+			data: {
+				type: "Transaction",
+				attributes: {
+					amount: amount,
+					currency: currency,
+					narration: narration,
+					source: "wallet",
+					destination: "wallet",
+				},
+				relationships: {
+					sourceAccount: {
+						data: {
+							id: fromAccountId,
+							type: "DepositAccount",
+						},
+					},
+					destinationAccount: {
+						data: {
+							id: toAccountId,
+							type: "DepositAccount",
+						},
+					},
+				},
+			},
+		};
+
+		console.log("📝 Transfer payload:", JSON.stringify(payload, null, 2));
+
+		// ✅ Use Anchor's transaction endpoint
+		const response = await makeAnchorRequest("post", "/transactions", payload);
+
+		if (response.data?.data) {
+			console.log(`✅ Transfer completed successfully`);
+			return {
+				success: true,
+				transactionId: response.data.data.id,
+				transaction: response.data.data,
+			};
+		}
+
+		return {
+			success: false,
+			error: "Invalid response from Anchor",
+		};
+	} catch (error) {
+		console.error("❌ Transfer between accounts error:", error);
+
+		// ✅ If internal transfer fails, try using the settlement account method
+		if (error.response?.status === 404) {
+			console.log(
+				"⚠️ Internal transfer endpoint not found, trying alternative method...",
+			);
+			return await transferViaSettlement(
+				fromAccountId,
+				toAccountId,
+				amount,
+				currency,
+				narration,
+			);
+		}
+
+		return handleAnchorError(error);
+	}
+};
+
+/**
+ * ✅ Alternative: Transfer via settlement account
+ */
+export const transferViaSettlement = async (
+	fromAccountId,
+	toAccountId,
+	amount,
+	currency = "NGN",
+	narration = "Transfer",
+) => {
+	try {
+		console.log(`🔄 Transferring via settlement: ₦${amount}`);
+
+		// First, get the settlement account ID
+		const settlementResponse = await makeAnchorRequest(
+			"get",
+			`/deposit-accounts/${fromAccountId}/settlement-account`,
+		);
+
+		if (!settlementResponse.data?.data) {
+			throw new Error("Could not get settlement account");
+		}
+
+		const settlementAccountId = settlementResponse.data.data.id;
+
+		// Then transfer from settlement account to destination
+		const payload = {
+			data: {
+				type: "Transfer",
+				attributes: {
+					amount: amount,
+					currency: currency,
+					narration: narration,
+				},
+				relationships: {
+					sourceAccount: {
+						data: {
+							id: settlementAccountId,
+							type: "SettlementAccount",
+						},
+					},
+					destinationAccount: {
+						data: {
+							id: toAccountId,
+							type: "DepositAccount",
+						},
+					},
+				},
+			},
+		};
+
+		const response = await makeAnchorRequest("post", "/transfers", payload);
+
+		if (response.data?.data) {
+			return {
+				success: true,
+				transactionId: response.data.data.id,
+				transaction: response.data.data,
+			};
+		}
+
+		return {
+			success: false,
+			error: "Transfer via settlement failed",
+		};
+	} catch (error) {
+		console.error("❌ Transfer via settlement error:", error);
+		return handleAnchorError(error);
+	}
+};
+
 // Export all functions
 export default {
 	// Customers
@@ -881,6 +1035,8 @@ export default {
 	getAccountTransactions,
 	getAccountNumberForDeposit, // ✅ New method
 	getWalletBalance,
+	transferBetweenAccounts,
+	transferViaSettlement,
 
 	// Webhook
 	verifyWebhookSignature,

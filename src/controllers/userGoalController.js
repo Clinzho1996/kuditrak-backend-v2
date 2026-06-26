@@ -221,34 +221,105 @@ const createGoalDepositAccount = async (userId, goal) => {
 	}
 };
 
-/**
- * ✅ Transfer funds from main wallet to goal deposit account
- */
 const transferToGoal = async (userId, goal, amount) => {
 	try {
+		console.log(`💰 Transferring ₦${amount} to goal: ${goal.name}`);
+
+		// ✅ Get user with Anchor data
 		const user = await getUserWithAnchorData(userId);
 
+		// ✅ Get main wallet
 		const mainWallet = await getMainWallet(userId);
 		if (!mainWallet) {
 			throw new Error("Main wallet not found");
 		}
 
+		// ✅ Ensure goal has a deposit account
 		if (!goal.goalDepositAccountId) {
 			await createGoalDepositAccount(userId, goal);
 		}
 
+		// ✅ Validate user has Anchor customer ID
 		if (!user.anchorCustomerId) {
 			throw new Error("User does not have an Anchor customer ID");
 		}
 
-		mainWallet.balance -= amount;
-		mainWallet.allocated = (mainWallet.allocated || 0) + amount;
-		mainWallet.available = mainWallet.balance - mainWallet.allocated;
-		await mainWallet.save();
+		// ✅ Step 1: Get the REAL balances from Anchor
+		console.log(`📊 Fetching real balances from Anchor...`);
 
+		const mainBalance = await anchorService.getWalletBalance(
+			mainWallet.walletId,
+		);
+		if (!mainBalance.success) {
+			throw new Error("Could not get main wallet balance from Anchor");
+		}
+
+		const mainBalanceInNGN = mainBalance.balance / 100;
+		console.log(`📊 Main wallet balance: ₦${mainBalanceInNGN}`);
+
+		if (mainBalanceInNGN < amount) {
+			throw new Error(
+				`Insufficient balance. Available: ₦${mainBalanceInNGN.toLocaleString()}`,
+			);
+		}
+
+		// ✅ Step 2: Get goal deposit account balance (just to verify)
+		const goalBalance = await anchorService.getWalletBalance(
+			goal.goalDepositAccountId,
+		);
+		const goalBalanceInNGN = goalBalance.success
+			? goalBalance.balance / 100
+			: 0;
+		console.log(`📊 Goal current balance: ₦${goalBalanceInNGN}`);
+
+		// ✅ Step 3: Transfer funds between Anchor deposit accounts
+		console.log(`🔄 Moving ₦${amount} from main wallet to goal...`);
+
+		// Amount in kobo (Anchor uses kobo)
+		const amountInKobo = Math.round(amount * 100);
+
+		const transferResult = await anchorService.transferBetweenAccounts(
+			mainWallet.walletId, // Source: Main wallet
+			goal.goalDepositAccountId, // Destination: Goal wallet
+			amountInKobo, // Amount in kobo
+			"NGN",
+			`Transfer to goal: ${goal.name}`,
+		);
+
+		if (!transferResult.success) {
+			throw new Error(
+				"Transfer failed: " + (transferResult.error || "Unknown error"),
+			);
+		}
+
+		console.log(`✅ Transfer completed: ${transferResult.transactionId}`);
+
+		// ✅ Step 4: Fetch updated balances from Anchor
+		const updatedMainBalance = await anchorService.getWalletBalance(
+			mainWallet.walletId,
+		);
+		if (updatedMainBalance.success) {
+			const newBalance = updatedMainBalance.balance / 100;
+			mainWallet.balance = newBalance;
+			mainWallet.allocated = (mainWallet.allocated || 0) + amount;
+			mainWallet.available = newBalance - mainWallet.allocated;
+			await mainWallet.save();
+			console.log(`✅ Main wallet updated: ₦${mainWallet.balance}`);
+		}
+
+		const updatedGoalBalance = await anchorService.getWalletBalance(
+			goal.goalDepositAccountId,
+		);
+		if (updatedGoalBalance.success) {
+			const newGoalBalance = updatedGoalBalance.balance / 100;
+			console.log(`✅ Goal wallet updated: ₦${newGoalBalance}`);
+		}
+
+		// ✅ Step 5: Update goal allocation
 		goal.allocatedAmount += amount;
 		await goal.save();
 
+		// ✅ Step 6: Create transaction record with Anchor transfer ID
 		await AnchorTransaction.create({
 			userId,
 			anchorCustomerId: user.anchorCustomerId,
@@ -266,13 +337,20 @@ const transferToGoal = async (userId, goal, amount) => {
 				goalName: goal.name,
 				goalDepositAccountId: goal.goalDepositAccountId,
 				transferType: "goal_allocation",
+				anchorTransferId: transferResult.transactionId,
 				userEmail: user.email,
 				userName: user.fullName,
+				fromAccount: mainWallet.walletId,
+				toAccount: goal.goalDepositAccountId,
+				amountInKobo: amountInKobo,
 			},
 		});
 
-		console.log(`✅ Transferred ₦${amount} to goal: ${goal.name}`);
-		return { success: true };
+		console.log(`✅ Successfully transferred ₦${amount} to goal: ${goal.name}`);
+		return {
+			success: true,
+			transactionId: transferResult.transactionId,
+		};
 	} catch (error) {
 		console.error("❌ transferToGoal error:", error);
 		throw error;
