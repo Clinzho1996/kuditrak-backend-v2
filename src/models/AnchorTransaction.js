@@ -141,6 +141,7 @@ const anchorTransactionSchema = new mongoose.Schema({
 		enum: [
 			"wallet",
 			"card",
+			"goal",
 			"bank_transfer",
 			"virtual_account",
 			"platform_wallet",
