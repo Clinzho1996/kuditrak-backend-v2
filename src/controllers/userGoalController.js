@@ -1,12 +1,13 @@
-// controllers/userGoalController.js
+// controllers/userGoalController.js - Fixed with proper Anchor integration
+
 import cron from "node-cron";
 import AllocationRecord from "../models/AllocationRecord.js";
 import AnchorSubAccount from "../models/AnchorSubAccount.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
 import AnchorWallet from "../models/AnchorWallet.js";
-import Transaction from "../models/Transaction.js";
 import UserGoal from "../models/UserGoal.js";
 import { getOrCreateAnchorCustomer } from "../services/anchorCustomerService.js";
+import anchorService from "../services/anchorService.js";
 import { sendGoalNotification } from "../services/notificationService.js";
 import { sendPushToUser } from "../services/pushService.js";
 
@@ -16,10 +17,8 @@ const scheduledJobs = new Map();
 // ==================== HELPER FUNCTIONS ====================
 
 /**
- * Get or create user's main wallet
+ * Get or create user's main wallet with real Anchor data
  */
-// controllers/userGoalController.js - getMainWallet
-
 const getMainWallet = async (userId) => {
 	try {
 		let wallet = await AnchorWallet.findOne({ userId, walletType: "main" });
@@ -27,7 +26,7 @@ const getMainWallet = async (userId) => {
 		if (!wallet) {
 			console.log("🔄 No wallet found, creating one for user:", userId);
 
-			// Try to get Anchor customer
+			// Get or create Anchor customer
 			const customerResult = await getOrCreateAnchorCustomer(userId);
 			if (!customerResult.success) {
 				throw new Error(
@@ -35,19 +34,78 @@ const getMainWallet = async (userId) => {
 				);
 			}
 
+			// Create a real deposit account in Anchor
+			const accountResponse = await anchorService.createDepositAccount(
+				customerResult.customerId,
+				"SAVINGS",
+				{
+					userId: userId.toString(),
+					platform: "kuditrak",
+					currency: "NGN",
+					walletType: "main",
+				},
+			);
+
+			let walletId = `wallet_${Date.now()}_${userId.toString().slice(-6)}`;
+			let accountNumber = null;
+			let bankName = null;
+
+			if (accountResponse.success) {
+				walletId = accountResponse.accountId;
+				console.log(`✅ Deposit account created: ${walletId}`);
+
+				// Get the account number
+				try {
+					const accountNumberResponse =
+						await anchorService.getAccountNumberForDeposit(walletId);
+					if (accountNumberResponse.success) {
+						accountNumber = accountNumberResponse.accountNumber;
+						bankName = accountNumberResponse.bankName;
+					}
+				} catch (err) {
+					console.log("⚠️ Could not get account number:", err.message);
+				}
+			}
+
 			wallet = await AnchorWallet.create({
 				userId,
 				anchorCustomerId: customerResult.customerId,
-				walletId: `wallet_${Date.now()}_${userId.toString().slice(-6)}`,
+				walletId: walletId,
 				walletType: "main",
 				balance: 0,
+				allocated: 0,
+				available: 0,
 				name: "Main Wallet",
 				currency: "NGN",
 				status: "active",
-				isLocal: true,
+				accountNumber: accountNumber,
+				bankName: bankName,
+				isLocal: !accountResponse.success,
 			});
 
 			console.log("✅ Wallet created:", wallet._id);
+		}
+
+		// ✅ Sync balance with Anchor if not local
+		if (
+			!wallet.isLocal &&
+			wallet.walletId &&
+			!wallet.walletId.startsWith("local_")
+		) {
+			try {
+				const balanceResponse = await anchorService.getWalletBalance(
+					wallet.walletId,
+				);
+				if (balanceResponse.success) {
+					const balanceInNGN = balanceResponse.balance / 100; // Convert from kobo
+					wallet.balance = balanceInNGN;
+					wallet.available = balanceInNGN - (wallet.allocated || 0);
+					await wallet.save();
+					console.log(`✅ Balance synced: ₦${balanceInNGN}`);
+				}
+			} catch (err) {
+				console.log("⚠️ Could not sync balance:", err.message);
+			}
 		}
 
 		return wallet;
@@ -60,8 +118,6 @@ const getMainWallet = async (userId) => {
 /**
  * Get or create goal sub-account
  */
-// controllers/userGoalController.js - Fix getOrCreateGoalSubAccount
-
 const getOrCreateGoalSubAccount = async (userId, goal) => {
 	let subAccount = await AnchorSubAccount.findOne({
 		userId,
@@ -71,7 +127,6 @@ const getOrCreateGoalSubAccount = async (userId, goal) => {
 	if (!subAccount) {
 		const mainWallet = await getMainWallet(userId);
 
-		// ✅ FIX: Only use valid frequency values
 		const frequency = goal.allocationSchedule?.frequency || "monthly";
 		const validFrequency = ["daily", "weekly", "monthly"].includes(frequency)
 			? frequency
@@ -85,10 +140,11 @@ const getOrCreateGoalSubAccount = async (userId, goal) => {
 			type: "savings",
 			balance: goal.allocatedAmount || 0,
 			targetAmount: goal.goalAmount,
+			currency: "NGN",
 			autoSave: {
 				enabled: goal.allocationSchedule?.autoAllocateEnabled || false,
 				amount: goal.allocationSchedule?.amount || 0,
-				frequency: validFrequency, // ✅ Always use a valid enum value
+				frequency: validFrequency,
 				dayOfMonth: 1,
 			},
 			lockSettings: {
@@ -159,6 +215,8 @@ const scheduleAutoAllocation = (goalId, userId, frequency, amount) => {
 
 			// Transfer from main wallet to sub-account
 			wallet.balance -= amount;
+			wallet.allocated = (wallet.allocated || 0) + amount;
+			wallet.available = wallet.balance - wallet.allocated;
 			subAccount.balance += amount;
 			await wallet.save();
 			await subAccount.save();
@@ -174,7 +232,7 @@ const scheduleAutoAllocation = (goalId, userId, frequency, amount) => {
 				walletId: wallet._id,
 				subAccountId: subAccount._id,
 				amount: amount,
-				currency: "NGN",
+				currency: wallet.currency || "NGN",
 				type: "debit",
 				category: "transfer",
 				status: "success",
@@ -209,7 +267,6 @@ export const listGoals = async (req, res) => {
 			createdAt: -1,
 		});
 
-		// Enrich with sub-account data
 		const enrichedGoals = await Promise.all(
 			goals.map(async (goal) => {
 				let subAccount = null;
@@ -269,8 +326,9 @@ export const getGoalById = async (req, res) => {
 	}
 };
 
-// controllers/userGoalController.js - Fixed createGoal
-
+/**
+ * Create goal
+ */
 export const createGoal = async (req, res) => {
 	try {
 		const {
@@ -286,10 +344,8 @@ export const createGoal = async (req, res) => {
 			lockType = "Flexible",
 		} = req.body;
 
-		console.log("📥 Create goal request body:", req.body);
-		console.log("👤 User ID:", req.user._id);
+		console.log("📥 Create goal request:", { name, goalAmount, lockType });
 
-		// ✅ Validate required fields
 		if (!name) {
 			return res.status(400).json({ error: "Name is required" });
 		}
@@ -298,18 +354,8 @@ export const createGoal = async (req, res) => {
 			return res.status(400).json({ error: "Valid goal amount is required" });
 		}
 
-		// ✅ Get main wallet - with better error handling
-		let wallet;
-		try {
-			wallet = await getMainWallet(req.user._id);
-		} catch (walletError) {
-			console.error("❌ Wallet error:", walletError);
-			return res.status(500).json({
-				error: "Failed to get or create wallet",
-				details: walletError.message,
-			});
-		}
-
+		// Get main wallet with real Anchor data
+		const wallet = await getMainWallet(req.user._id);
 		if (!wallet) {
 			return res
 				.status(500)
@@ -318,7 +364,7 @@ export const createGoal = async (req, res) => {
 
 		console.log("✅ Wallet found:", wallet._id);
 
-		// ✅ Create goal with all required fields
+		// Create goal
 		const goalData = {
 			userId: req.user._id,
 			walletId: wallet._id,
@@ -328,6 +374,7 @@ export const createGoal = async (req, res) => {
 			icon: icon,
 			color: color,
 			lockType: lockType,
+			currency: wallet.currency || "NGN",
 			allocationSchedule: {
 				frequency: frequency || "monthly",
 				amount: autoAllocateAmount || 0,
@@ -341,8 +388,6 @@ export const createGoal = async (req, res) => {
 			},
 		};
 
-		console.log("📝 Creating goal with data:", goalData);
-
 		const goal = new UserGoal(goalData);
 		await goal.save();
 
@@ -354,7 +399,6 @@ export const createGoal = async (req, res) => {
 			subAccount = await getOrCreateGoalSubAccount(req.user._id, goal);
 		} catch (subError) {
 			console.error("❌ Sub-account error:", subError);
-			// Continue even if sub-account fails - the goal is already created
 		}
 
 		// Send notification
@@ -386,13 +430,13 @@ export const createGoal = async (req, res) => {
 		});
 	} catch (err) {
 		console.error("❌ Create goal error:", err);
-		res.status(500).json({
-			error: err.message,
-			details: err.stack,
-		});
+		res.status(500).json({ error: err.message });
 	}
 };
 
+/**
+ * Update goal
+ */
 export const updateGoal = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -421,11 +465,7 @@ export const updateGoal = async (req, res) => {
 		if (goalAmount) goal.goalAmount = goalAmount;
 		if (icon) goal.icon = icon;
 		if (color) goal.color = color;
-
-		// ✅ Update lockType if provided
-		if (lockType) {
-			goal.lockType = lockType;
-		}
+		if (lockType) goal.lockType = lockType;
 
 		// Handle Lock Type / Commitment Settings
 		if (lockType !== undefined) {
@@ -445,21 +485,6 @@ export const updateGoal = async (req, res) => {
 					releaseDate: null,
 					committedAt: null,
 					originalGoalAmount: null,
-				};
-			}
-		} else if (releaseDate !== undefined) {
-			if (releaseDate) {
-				goal.commitmentSettings = {
-					...goal.commitmentSettings,
-					enabled: true,
-					releaseDate: new Date(releaseDate),
-					committedAt: goal.commitmentSettings?.committedAt || new Date(),
-				};
-			} else {
-				goal.commitmentSettings = {
-					...goal.commitmentSettings,
-					enabled: false,
-					releaseDate: null,
 				};
 			}
 		}
@@ -535,7 +560,6 @@ export const updateGoal = async (req, res) => {
 		goal.updatedAt = new Date();
 		await goal.save();
 
-		// Fetch updated sub-account
 		let subAccount = null;
 		if (goal.subAccountId) {
 			subAccount = await AnchorSubAccount.findOne({
@@ -559,39 +583,33 @@ export const updateGoal = async (req, res) => {
 	}
 };
 
-// controllers/userGoalController.js - Complete updated deleteGoal
-
+/**
+ * Delete goal with proper Anchor integration
+ */
 export const deleteGoal = async (req, res) => {
 	try {
 		const { id } = req.params;
 
 		console.log("🔵 Deleting goal:", id);
 
-		// Stop any scheduled auto-allocation jobs
 		if (scheduledJobs.has(id)) {
 			scheduledJobs.get(id).stop();
 			scheduledJobs.delete(id);
 		}
 
-		// Find the goal
 		const goal = await UserGoal.findOne({ _id: id, userId: req.user._id });
 
 		if (!goal) {
 			return res.status(404).json({ error: "Goal not found" });
 		}
 
-		// ✅ CRITICAL FIX: Determine effective lock type from BOTH fields
-		// The UI might show Soft Lock but lockType might be 'Flexible'
 		let effectiveLockType = goal.lockType || "Flexible";
 
-		// If commitmentSettings.enabled is true, it's locked regardless of lockType
 		if (goal.commitmentSettings?.enabled) {
-			// If lockType is 'Flexible' but commitment is enabled, it's actually Soft Lock
 			if (effectiveLockType === "Flexible") {
 				effectiveLockType = "Soft Lock";
 			}
 		} else {
-			// If commitment is disabled, it should be Flexible
 			effectiveLockType = "Flexible";
 		}
 
@@ -599,21 +617,15 @@ export const deleteGoal = async (req, res) => {
 			id: goal._id,
 			name: goal.name,
 			allocatedAmount: goal.allocatedAmount,
-			subAccountId: goal.subAccountId,
-			storedLockType: goal.lockType,
-			commitmentEnabled: goal.commitmentSettings?.enabled,
 			effectiveLockType: effectiveLockType,
-			releaseDate: goal.commitmentSettings?.releaseDate,
 		});
 
-		// ✅ Initialize variables
 		let subAccount = null;
 		let subAccountBalance = 0;
 		let refundAmount = 0;
 		let penaltyApplied = 0;
 		let refundMessage = "";
 
-		// ✅ Get sub-account to check balance
 		if (goal.subAccountId) {
 			subAccount = await AnchorSubAccount.findOne({
 				userId: req.user._id,
@@ -626,12 +638,7 @@ export const deleteGoal = async (req, res) => {
 			}
 		}
 
-		// ✅ Get main wallet
-		const wallet = await AnchorWallet.findOne({
-			userId: req.user._id,
-			walletType: "main",
-		});
-
+		const wallet = await getMainWallet(req.user._id);
 		if (!wallet) {
 			return res.status(404).json({ error: "Wallet not found" });
 		}
@@ -640,32 +647,24 @@ export const deleteGoal = async (req, res) => {
 			_id: wallet._id,
 			balance: wallet.balance,
 			allocated: wallet.allocated || 0,
-			available: wallet.available || 0,
 		});
 
-		// ✅ Total funds to refund = sub-account balance + goal.allocatedAmount
 		const totalAllocatedFunds = subAccountBalance + (goal.allocatedAmount || 0);
 
-		console.log(
-			`💰 Total funds to process: ₦${totalAllocatedFunds} (subAccount: ₦${subAccountBalance}, goal.allocatedAmount: ₦${goal.allocatedAmount})`,
-		);
+		console.log(`💰 Total funds to process: ₦${totalAllocatedFunds}`);
 
-		// ✅ Check lock type (using effectiveLockType)
 		const isHardLock = effectiveLockType === "Hard Lock";
 		const isSoftLock = effectiveLockType === "Soft Lock";
 		const isLocked = isHardLock || isSoftLock;
 
-		// ✅ If there are funds, handle refund logic
 		if (totalAllocatedFunds > 0) {
 			refundAmount = totalAllocatedFunds;
 
-			// ✅ For Hard Lock: Check if target date has passed
 			if (isHardLock && goal.commitmentSettings?.releaseDate) {
 				const now = new Date();
 				const releaseDate = new Date(goal.commitmentSettings.releaseDate);
 
 				if (now < releaseDate) {
-					// Hard Lock - Cannot delete before release date
 					return res.status(400).json({
 						error: "Cannot delete this goal",
 						message: `This goal has a Hard Lock and cannot be deleted until ${releaseDate.toLocaleDateString()}.`,
@@ -678,20 +677,18 @@ export const deleteGoal = async (req, res) => {
 				}
 			}
 
-			// ✅ For Soft Lock: Apply 7% penalty on early withdrawal
 			if (isSoftLock && goal.commitmentSettings?.releaseDate) {
 				const now = new Date();
 				const releaseDate = new Date(goal.commitmentSettings.releaseDate);
 
 				if (now < releaseDate) {
-					// Early withdrawal - apply penalty
 					const penaltyRate = 0.07;
 					penaltyApplied = Math.round(totalAllocatedFunds * penaltyRate);
 					refundAmount = totalAllocatedFunds - penaltyApplied;
 					refundMessage = `7% penalty (₦${penaltyApplied.toLocaleString()}) applied for early withdrawal.`;
 					console.log(`⚠️ Soft lock penalty: ₦${penaltyApplied}`);
 
-					// ✅ Collect penalty to platform wallet
+					// Collect penalty to platform wallet
 					const platformWalletId = process.env.SYSTEM_BUCKET_ID;
 					if (platformWalletId) {
 						let platformWallet = await AnchorWallet.findOne({
@@ -711,22 +708,19 @@ export const deleteGoal = async (req, res) => {
 								status: "active",
 								isLocal: true,
 							});
-							console.log("✅ Platform wallet created:", platformWallet._id);
 						}
 
-						// Transfer penalty to platform wallet
 						platformWallet.balance += penaltyApplied;
 						platformWallet.available =
 							platformWallet.balance - (platformWallet.allocated || 0);
 						await platformWallet.save();
 
-						// Create penalty transaction
 						await AnchorTransaction.create({
 							userId: req.user._id,
 							anchorCustomerId: wallet.anchorCustomerId,
 							walletId: platformWallet._id,
 							amount: penaltyApplied,
-							currency: "NGN",
+							currency: wallet.currency || "NGN",
 							type: "credit",
 							category: "penalty",
 							status: "success",
@@ -750,18 +744,14 @@ export const deleteGoal = async (req, res) => {
 				}
 			}
 
-			// ✅ Refund to main wallet (only the refund amount, not including penalty)
+			// Refund to main wallet
 			wallet.balance += refundAmount;
-
-			// ✅ Reduce allocated by the total amount (including penalty)
 			if (wallet.allocated !== undefined) {
 				wallet.allocated = Math.max(
 					0,
 					(wallet.allocated || 0) - totalAllocatedFunds,
 				);
 			}
-
-			// ✅ Update available balance
 			wallet.available = wallet.balance - (wallet.allocated || 0);
 			await wallet.save();
 
@@ -769,18 +759,16 @@ export const deleteGoal = async (req, res) => {
 				_id: wallet._id,
 				balance: wallet.balance,
 				allocated: wallet.allocated || 0,
-				available: wallet.available || 0,
 				refundAmount: refundAmount,
 				penaltyApplied: penaltyApplied,
 			});
 
-			// ✅ Create refund transaction
 			await AnchorTransaction.create({
 				userId: req.user._id,
 				anchorCustomerId: wallet.anchorCustomerId,
 				walletId: wallet._id,
 				amount: refundAmount,
-				currency: "NGN",
+				currency: wallet.currency || "NGN",
 				type: "credit",
 				category: "refund",
 				status: "success",
@@ -803,24 +791,20 @@ export const deleteGoal = async (req, res) => {
 			console.log("ℹ️ No funds to refund");
 		}
 
-		// ✅ Reset goal's allocatedAmount to 0
 		goal.allocatedAmount = 0;
 		await goal.save();
 
-		// ✅ Delete sub-account if exists
 		if (goal.subAccountId) {
-			const deleted = await AnchorSubAccount.findOneAndDelete({
+			await AnchorSubAccount.findOneAndDelete({
 				userId: req.user._id,
 				subAccountId: goal.subAccountId,
 			});
-			console.log(`🗑️ Sub-account deleted: ${deleted ? "Yes" : "No"}`);
+			console.log("🗑️ Sub-account deleted");
 		}
 
-		// ✅ Delete the goal
 		await goal.deleteOne();
 		console.log("🗑️ Goal deleted");
 
-		// ✅ Send notification with refund details
 		let notificationBody = `Your goal "${goal.name}" has been deleted.`;
 		if (refundAmount > 0) {
 			notificationBody += ` ₦${Math.floor(refundAmount).toLocaleString()} has been refunded to your wallet.${penaltyApplied > 0 ? ` (₦${penaltyApplied.toLocaleString()} penalty applied)` : ""}`;
@@ -852,7 +836,7 @@ export const deleteGoal = async (req, res) => {
 };
 
 /**
- * Toggle auto-allocation for a goal
+ * Toggle auto-allocation
  */
 export const toggleAutoAllocate = async (req, res) => {
 	try {
@@ -869,7 +853,6 @@ export const toggleAutoAllocate = async (req, res) => {
 		goal.updatedAt = new Date();
 		await goal.save();
 
-		// Update sub-account
 		if (goal.subAccountId) {
 			const subAccount = await AnchorSubAccount.findOne({
 				userId: req.user._id,
@@ -911,7 +894,7 @@ export const toggleAutoAllocate = async (req, res) => {
 };
 
 /**
- * Commit to a goal (lock funds until release date)
+ * Commit to a goal
  */
 export const commitToGoal = async (req, res) => {
 	try {
@@ -950,7 +933,6 @@ export const commitToGoal = async (req, res) => {
 		goal.updatedAt = new Date();
 		await goal.save();
 
-		// Update sub-account lock settings
 		if (goal.subAccountId) {
 			const subAccount = await AnchorSubAccount.findOne({
 				userId: req.user._id,
@@ -1030,7 +1012,6 @@ export const releaseFromCommitment = async (req, res) => {
 		goal.updatedAt = new Date();
 		await goal.save();
 
-		// Update sub-account lock settings
 		if (goal.subAccountId) {
 			const subAccount = await AnchorSubAccount.findOne({
 				userId: req.user._id,
@@ -1076,10 +1057,9 @@ export const releaseFromCommitment = async (req, res) => {
 	}
 };
 
-// controllers/userGoalController.js - Fixed allocateToGoal
-
-// controllers/userGoalController.js - Fixed allocateToGoal
-
+/**
+ * Allocate to goal
+ */
 export const allocateToGoal = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -1095,7 +1075,7 @@ export const allocateToGoal = async (req, res) => {
 			return res.status(404).json({ error: "Goal not found" });
 		}
 
-		const wallet = await AnchorWallet.findOne({ userId: req.user._id });
+		const wallet = await getMainWallet(req.user._id);
 		if (!wallet) {
 			return res.status(404).json({ error: "Wallet not found" });
 		}
@@ -1111,7 +1091,6 @@ export const allocateToGoal = async (req, res) => {
 			});
 		}
 
-		// ✅ 1. Check if committed BEFORE processing (to know if we need to warn)
 		const isCommitted =
 			goal.isCommitted || goal.commitmentSettings?.enabled || false;
 		let commitmentWarning = null;
@@ -1120,22 +1099,20 @@ export const allocateToGoal = async (req, res) => {
 			commitmentWarning = `You've committed to this goal until ${new Date(goal.commitmentSettings.releaseDate).toLocaleDateString()}. You can still allocate funds, but early withdrawal penalties apply.`;
 		}
 
-		// ✅ 2. PROCESS THE ALLOCATION FIRST (always)
-		// Update wallet
+		// Process allocation
 		wallet.balance -= amount;
 		wallet.allocated = (wallet.allocated || 0) + amount;
 		wallet.available = wallet.balance - wallet.allocated;
 		await wallet.save();
 
-		// Update goal allocated amount
 		goal.allocatedAmount += amount;
 		await goal.save();
 
 		const isCompleted = goal.allocatedAmount >= goal.goalAmount;
 
-		// ✅ 3. Create allocation record
+		// Create allocation record
 		try {
-			const allocationRecord = await AllocationRecord.create({
+			await AllocationRecord.create({
 				goalId: goal._id,
 				userId: req.user._id,
 				amount: amount,
@@ -1148,12 +1125,10 @@ export const allocateToGoal = async (req, res) => {
 					commitmentWarning: commitmentWarning,
 				},
 			});
-			console.log("✅ Allocation record created:", allocationRecord);
 		} catch (recordError) {
 			console.error("❌ Failed to create allocation record:", recordError);
 		}
 
-		// ✅ 4. Send notification
 		await sendGoalNotification(
 			req.user._id,
 			goal.name,
@@ -1162,13 +1137,8 @@ export const allocateToGoal = async (req, res) => {
 			isCompleted ? "completed" : "updated",
 		);
 
-		const updatedWallet = await AnchorWallet.findOne({ userId: req.user._id });
-		if (updatedWallet) {
-			updatedWallet.available = updatedWallet.balance - updatedWallet.allocated;
-			await updatedWallet.save();
-		}
+		const updatedWallet = await getMainWallet(req.user._id);
 
-		// Stop auto-allocation if goal is completed
 		if (
 			goal.allocatedAmount >= goal.goalAmount &&
 			scheduledJobs.has(goal._id)
@@ -1177,13 +1147,11 @@ export const allocateToGoal = async (req, res) => {
 			scheduledJobs.delete(goal._id);
 		}
 
-		// ✅ 5. Get the latest allocation record
 		const allocation = await AllocationRecord.findOne({
 			goalId: goal._id,
 			userId: req.user._id,
 		}).sort({ timestamp: -1 });
 
-		// ✅ 6. Return response with commitment warning if applicable
 		const responseData = {
 			success: true,
 			data: goal,
@@ -1198,7 +1166,6 @@ export const allocateToGoal = async (req, res) => {
 			message: "Funds allocated successfully",
 		};
 
-		// ✅ If there was a commitment warning, include it in the response
 		if (commitmentWarning) {
 			return res.status(403).json({
 				...responseData,
@@ -1213,8 +1180,10 @@ export const allocateToGoal = async (req, res) => {
 		res.status(500).json({ error: err.message });
 	}
 };
-// controllers/userGoalController.js - Fixed withdrawDesignatedFunds
 
+/**
+ * Withdraw designated funds
+ */
 export const withdrawDesignatedFunds = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -1234,7 +1203,7 @@ export const withdrawDesignatedFunds = async (req, res) => {
 			return res.status(400).json({ error: "Insufficient designated funds" });
 		}
 
-		let wallet = await AnchorWallet.findOne({ userId: req.user._id });
+		const wallet = await getMainWallet(req.user._id);
 		if (!wallet) {
 			return res.status(404).json({ error: "Wallet not found" });
 		}
@@ -1274,7 +1243,7 @@ export const withdrawDesignatedFunds = async (req, res) => {
 
 		// Create withdrawal record
 		try {
-			const withdrawalRecord = await AllocationRecord.create({
+			await AllocationRecord.create({
 				goalId: goal._id,
 				userId: req.user._id,
 				amount: amount,
@@ -1288,21 +1257,23 @@ export const withdrawDesignatedFunds = async (req, res) => {
 					isEarlyRelease: isEarlyRelease,
 				},
 			});
-			console.log("✅ Withdrawal record created:", withdrawalRecord);
 		} catch (recordError) {
 			console.error("❌ Failed to create withdrawal record:", recordError);
 		}
 
 		// Create transaction record
-		await Transaction.create({
-			walletId: wallet._id,
+		await AnchorTransaction.create({
 			userId: req.user._id,
-			transactionId: `WITHDRAW-GOAL-${goal._id}-${Date.now()}`,
-			type: "expense",
+			anchorCustomerId: wallet.anchorCustomerId,
+			walletId: wallet._id,
 			amount: amount,
-			status: "Completed",
-			description: `Withdrawal of designated funds from goal: ${goal.name}`,
-			source: "goal_withdrawal",
+			currency: wallet.currency || "NGN",
+			type: "credit",
+			category: "withdrawal",
+			status: "success",
+			description: `Withdrawal from goal: ${goal.name}`,
+			source: "sub_account",
+			destination: "wallet",
 			metadata: {
 				goalId: goal._id,
 				goalName: goal.name,
@@ -1314,40 +1285,58 @@ export const withdrawDesignatedFunds = async (req, res) => {
 
 		// Create penalty transaction if applicable
 		if (penaltyFee > 0) {
-			const platformWallet = await AnchorWallet.findOne({
-				userId: process.env.SYSTEM_BUCKET_ID,
-			});
-			if (platformWallet) {
+			const platformWalletId = process.env.SYSTEM_BUCKET_ID;
+			if (platformWalletId) {
+				let platformWallet = await AnchorWallet.findOne({
+					userId: platformWalletId,
+					walletType: "main",
+				});
+
+				if (!platformWallet) {
+					platformWallet = await AnchorWallet.create({
+						userId: platformWalletId,
+						anchorCustomerId: `platform_${Date.now()}`,
+						walletId: `platform_wallet_${Date.now()}`,
+						walletType: "main",
+						balance: 0,
+						name: "Platform Wallet",
+						currency: "NGN",
+						status: "active",
+						isLocal: true,
+					});
+				}
+
 				platformWallet.balance += penaltyFee;
 				platformWallet.available =
-					platformWallet.balance - platformWallet.allocated;
+					platformWallet.balance - (platformWallet.allocated || 0);
 				await platformWallet.save();
 
-				await Transaction.create({
+				await AnchorTransaction.create({
+					userId: req.user._id,
+					anchorCustomerId: wallet.anchorCustomerId,
 					walletId: platformWallet._id,
-					userId: process.env.SYSTEM_BUCKET_ID,
-					transactionId: `PENALTY-${goal._id}-${Date.now()}`,
-					type: "income",
 					amount: penaltyFee,
-					status: "Completed",
-					description: `Early release penalty fee from user ${req.user._id} for goal: ${goal.name}`,
-					source: "penalty_fee",
+					currency: wallet.currency || "NGN",
+					type: "credit",
+					category: "penalty",
+					status: "success",
+					description: `Early release penalty from goal: ${goal.name}`,
+					source: "sub_account",
+					destination: "platform_wallet",
 					metadata: {
-						userId: req.user._id,
 						goalId: goal._id,
 						goalName: goal.name,
-						withdrawAmount: amount,
 						penaltyAmount: penaltyFee,
+						withdrawAmount: amount,
+						userId: req.user._id,
 					},
 				});
+
+				console.log(`✅ Penalty ₦${penaltyFee} collected to platform wallet`);
 			}
 		}
 
-		const updatedWallet = await AnchorWallet.findOne({ userId: req.user._id });
-		if (updatedWallet) {
-			updatedWallet.available = updatedWallet.balance - updatedWallet.allocated;
-			await updatedWallet.save();
-		}
+		const updatedWallet = await getMainWallet(req.user._id);
 
 		const allocation = await AllocationRecord.findOne({
 			goalId: goal._id,
@@ -1374,6 +1363,7 @@ export const withdrawDesignatedFunds = async (req, res) => {
 		res.status(500).json({ error: err.message });
 	}
 };
+
 /**
  * Get goal statistics
  */
@@ -1416,6 +1406,7 @@ export const getGoalStats = async (req, res) => {
 				releaseDate: subAccount?.lockSettings?.unlockDate || null,
 				icon: goal.icon || "💰",
 				color: goal.color || "#4F46E5",
+				currency: goal.currency || "NGN",
 			},
 		});
 	} catch (err) {
@@ -1424,10 +1415,9 @@ export const getGoalStats = async (req, res) => {
 	}
 };
 
-// controllers/userGoalController.js - Add this function
-
-// controllers/userGoalController.js - Updated getGoalTransactions
-
+/**
+ * Get goal transactions
+ */
 export const getGoalTransactions = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -1438,7 +1428,6 @@ export const getGoalTransactions = async (req, res) => {
 			return res.status(404).json({ error: "Goal not found" });
 		}
 
-		// ✅ Get ALL allocation records (including withdrawals)
 		const records = await AllocationRecord.find({
 			goalId: goal._id,
 			userId: userId,
@@ -1448,7 +1437,6 @@ export const getGoalTransactions = async (req, res) => {
 
 		console.log(`📊 Found ${records.length} allocation records`);
 
-		// Format transactions
 		const transactions = records.map((record) => {
 			const isWithdrawal =
 				record.type === "withdrawal" || record.type === "penalty";
@@ -1460,10 +1448,10 @@ export const getGoalTransactions = async (req, res) => {
 					record.description || (isWithdrawal ? "Withdrawal" : "Deposit"),
 				createdAt: record.timestamp,
 				balanceAfter: record.balanceAfter || 0,
+				metadata: record.metadata || {},
 			};
 		});
 
-		// Sort by date (newest first)
 		transactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
 		res.status(200).json({
@@ -1477,7 +1465,6 @@ export const getGoalTransactions = async (req, res) => {
 	}
 };
 
-// Export all functions
 export default {
 	listGoals,
 	getGoalById,
