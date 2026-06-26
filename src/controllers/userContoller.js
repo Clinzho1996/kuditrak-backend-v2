@@ -899,11 +899,7 @@ export const updateKYC = async (req, res) => {
 	}
 };
 
-/**
- * Helper function to create virtual account for user
- * ✅ REAL ANCHOR ONLY - No mock fallback
- */
-// backend/controllers/userController.js - Updated createVirtualAccountForUser
+// backend/controllers/userController.js - Fixed createVirtualAccountForUser
 
 export const createVirtualAccountForUser = async (userId) => {
 	try {
@@ -1028,7 +1024,6 @@ export const createVirtualAccountForUser = async (userId) => {
 
 		// ✅ STEP 1: Check if account already exists in Anchor
 		let depositAccountId = null;
-		let existingAccountNumber = null;
 
 		try {
 			console.log("🔍 Checking for existing deposit accounts in Anchor...");
@@ -1040,23 +1035,6 @@ export const createVirtualAccountForUser = async (userId) => {
 				const existingAcc = accountsResponse.accounts[0];
 				depositAccountId = existingAcc.id || existingAcc.accountId;
 				console.log(`✅ Found existing deposit account: ${depositAccountId}`);
-
-				// Try to get account number for existing account
-				try {
-					const accountNumberResponse =
-						await anchorService.getAccountNumberForDeposit(depositAccountId);
-					if (accountNumberResponse.success) {
-						existingAccountNumber = accountNumberResponse.accountNumber;
-						console.log(
-							`✅ Found existing account number: ${existingAccountNumber}`,
-						);
-					}
-				} catch (err) {
-					console.log(
-						"⚠️ Could not get account number for existing account:",
-						err.message,
-					);
-				}
 			}
 		} catch (err) {
 			console.log("⚠️ Could not check existing accounts:", err.message);
@@ -1094,77 +1072,71 @@ export const createVirtualAccountForUser = async (userId) => {
 			console.log(`✅ Deposit account created: ${depositAccountId}`);
 		}
 
-		// ✅ STEP 3: Get account number using the correct endpoint
-		let accountNumber = existingAccountNumber;
-		let bankName = "Anchor Bank";
-		let accountName = user.fullName;
+		// ✅ STEP 3: Get account number with bank details from Anchor
+		console.log(
+			"📝 Getting account number with bank details for deposit account:",
+			depositAccountId,
+		);
 
-		if (!accountNumber) {
-			console.log(
-				"📝 Getting account number for deposit account:",
-				depositAccountId,
+		const accountNumberResponse =
+			await anchorService.getAccountNumberForDeposit(depositAccountId);
+
+		if (!accountNumberResponse.success) {
+			console.error(
+				"❌ Failed to get account number:",
+				accountNumberResponse.error,
 			);
-
-			const accountNumberResponse =
-				await anchorService.getAccountNumberForDeposit(depositAccountId);
-
-			if (!accountNumberResponse.success) {
-				console.error(
-					"❌ Failed to get account number:",
-					accountNumberResponse.error,
-				);
-
-				// Try the alternative method: get account details with include
-				try {
-					console.log("📝 Trying alternative method to get account number...");
-					const accountDetails =
-						await anchorService.getDepositAccount(depositAccountId);
-					if (accountDetails.success && accountDetails.account) {
-						accountNumber = accountDetails.account.accountNumber;
-						bankName = accountDetails.account.bankName || "Anchor Bank";
-						console.log(
-							`✅ Account number retrieved via include: ${accountNumber}`,
-						);
-					}
-				} catch (err) {
-					console.log("⚠️ Alternative method also failed:", err.message);
-				}
-
-				if (!accountNumber) {
-					return {
-						success: false,
-						error:
-							accountNumberResponse.error ||
-							"Failed to get account number from Anchor",
-					};
-				}
-			} else {
-				accountNumber = accountNumberResponse.accountNumber;
-				bankName = accountNumberResponse.bankName || "Anchor Bank";
-				accountName = accountNumberResponse.accountName || user.fullName;
-				console.log(`✅ Account number retrieved: ${accountNumber}`);
-			}
+			return {
+				success: false,
+				error:
+					accountNumberResponse.error ||
+					"Failed to get account number from Anchor",
+			};
 		}
 
-		// ✅ STEP 4: Save to database
+		// ✅ Extract ALL bank details from Anchor response - NO HARDCODING
+		const accountNumber = accountNumberResponse.accountNumber;
+		const bankName = accountNumberResponse.bankName; // ✅ "PROVIDUS BANK"
+		const bankCode = accountNumberResponse.bankCode; // ✅ "000023"
+		const accountName =
+			accountNumberResponse.accountName || user.fullName || "Kuditrak User";
+		const currency = accountNumberResponse.currency || "NGN";
+		const status = accountNumberResponse.status || "ACTIVE";
+
+		console.log(`✅ Account details retrieved from Anchor:`);
+		console.log(`   Account Number: ${accountNumber}`);
+		console.log(`   Bank Name: ${bankName} (${bankCode})`);
+		console.log(`   Account Name: ${accountName}`);
+		console.log(`   Currency: ${currency}`);
+		console.log(`   Status: ${status}`);
+
+		// ✅ STEP 4: Save to database with EXACT bank details from Anchor
 		const virtualAccount = await AnchorVirtualAccount.create({
 			userId,
 			anchorCustomerId: anchorCustomer.anchorCustomerId,
 			walletId: null,
 			accountNumber: accountNumber,
-			bankName: bankName,
-			bankCode: "000",
+			bankName: bankName, // ✅ EXACT bank name from Anchor
+			bankCode: bankCode, // ✅ EXACT bank code from Anchor
 			accountName: accountName,
 			anchorReference: depositAccountId,
 			isActive: true,
 			isMock: false,
 			provider: "anchor",
-			currency: "NGN",
+			currency: currency,
+			metadata: {
+				anchorStatus: status,
+				retrievedAt: new Date().toISOString(),
+			},
 		});
 
-		console.log(`✅ Virtual account saved: ${virtualAccount.accountNumber}`);
+		console.log(`✅ Virtual account saved with real bank details:`);
+		console.log(
+			`   Bank: ${virtualAccount.bankName} (${virtualAccount.bankCode})`,
+		);
+		console.log(`   Account: ${virtualAccount.accountNumber}`);
 
-		// ✅ STEP 5: Create or update wallet with REAL Anchor data
+		// ✅ STEP 5: Create or update wallet with REAL bank details
 		let wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -1174,24 +1146,24 @@ export const createVirtualAccountForUser = async (userId) => {
 			wallet = await AnchorWallet.create({
 				userId,
 				anchorCustomerId: anchorCustomer.anchorCustomerId,
-				walletId: depositAccountId, // ✅ Use the REAL Anchor deposit account ID
+				walletId: depositAccountId,
 				walletType: "main",
 				balance: 0,
 				name: "Main Wallet",
 				currency: "NGN",
 				status: "active",
 				accountNumber: virtualAccount.accountNumber,
-				bankName: virtualAccount.bankName,
+				bankName: virtualAccount.bankName, // ✅ REAL bank name
 				isLocal: false,
 			});
-			console.log(`✅ Wallet created with Anchor ID: ${wallet.walletId}`);
+			console.log(`✅ Wallet created with real bank: ${wallet.bankName}`);
 		} else {
 			wallet.walletId = depositAccountId;
 			wallet.accountNumber = virtualAccount.accountNumber;
-			wallet.bankName = virtualAccount.bankName;
+			wallet.bankName = virtualAccount.bankName; // ✅ REAL bank name
 			wallet.isLocal = false;
 			await wallet.save();
-			console.log("✅ Wallet updated with Anchor data");
+			console.log(`✅ Wallet updated with real bank: ${wallet.bankName}`);
 		}
 
 		// ✅ STEP 6: Send notification
@@ -1217,13 +1189,13 @@ export const createVirtualAccountForUser = async (userId) => {
 			account: virtualAccount,
 			accountNumber: virtualAccount.accountNumber,
 			bankName: virtualAccount.bankName,
+			bankCode: virtualAccount.bankCode,
 		};
 	} catch (error) {
 		console.error("❌ Create virtual account error:", error);
 		return { success: false, error: error.message };
 	}
 };
-
 // backend/controllers/userController.js - Add this function
 
 /**

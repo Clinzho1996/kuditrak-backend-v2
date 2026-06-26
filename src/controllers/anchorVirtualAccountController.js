@@ -141,6 +141,8 @@ export const createDepositAccount = async (req, res) => {
  * Get user's virtual account details
  * Now checks Anchor API first for real-time data
  */
+// backend/controllers/anchorVirtualAccountController.js - Fixed getVirtualAccount
+
 export const getVirtualAccount = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -176,33 +178,75 @@ export const getVirtualAccount = async (req, res) => {
 
 					console.log(`✅ Found Anchor account: ${accountId}`);
 
-					// Create local record
+					// ✅ Get account details with bank information
 					const accountDetails =
 						await anchorService.getDepositAccount(accountId);
 
+					// ✅ Extract bank details - NO DUMMY DATA
+					let accountNumber = "pending";
+					let bankName = null;
+					let bankCode = null;
+					let accountName = req.user.fullName || "Kuditrak User";
+
+					if (accountDetails.success && accountDetails.account) {
+						accountNumber = accountDetails.account.accountNumber || "pending";
+						bankName = accountDetails.account.bankName; // ✅ Will be null if not found
+						bankCode = accountDetails.account.bankCode; // ✅ Will be null if not found
+						accountName = accountDetails.account.accountName || accountName;
+					}
+
+					// ✅ If bank name is null, throw error - don't use dummy
+					if (!bankName) {
+						console.error("❌ Bank name not found in Anchor response");
+						return res.status(500).json({
+							success: false,
+							error: "Bank details not found. Please contact support.",
+							message: "Unable to retrieve bank name from Anchor.",
+						});
+					}
+
+					// ✅ Create local record with REAL bank details
 					virtualAccount = await AnchorVirtualAccount.create({
 						userId,
 						anchorCustomerId: anchorCustomer.anchorCustomerId,
 						walletId: null,
-						accountNumber: accountDetails.success
-							? accountDetails.account.accountNumber || "pending"
-							: "pending",
-						bankName: accountDetails.success
-							? accountDetails.account.bankName || "Anchor Bank"
-							: "Anchor Bank",
-						bankCode: "000",
-						accountName: req.user.fullName || "Kuditrak User",
+						accountNumber: accountNumber,
+						bankName: bankName, // ✅ REAL bank name from Anchor
+						bankCode: bankCode, // ✅ REAL bank code from Anchor
+						accountName: accountName,
 						anchorReference: accountId,
 						isActive: true,
 						isMock: false,
+						provider: "anchor",
+						currency: "NGN",
+						metadata: {
+							syncedAt: new Date().toISOString(),
+							source: "getVirtualAccount",
+						},
 					});
 
 					console.log(
 						`✅ Local account created from Anchor data: ${virtualAccount.accountNumber}`,
 					);
+					console.log(
+						`   Bank: ${virtualAccount.bankName} (${virtualAccount.bankCode})`,
+					);
+				} else {
+					// ✅ No account found in Anchor - don't create dummy
+					return res.status(404).json({
+						success: false,
+						error: "No virtual account found in Anchor",
+						message: "Create a deposit account first",
+						requiresCreation: true,
+					});
 				}
 			} catch (err) {
 				console.log("⚠️ Could not fetch accounts from Anchor:", err.message);
+				return res.status(500).json({
+					success: false,
+					error: "Failed to fetch account from Anchor",
+					message: err.message,
+				});
 			}
 		}
 
@@ -211,43 +255,71 @@ export const getVirtualAccount = async (req, res) => {
 				success: false,
 				error: "No virtual account found",
 				message: "Create a deposit account first",
+				requiresCreation: true,
 			});
 		}
 
-		// Refresh account details from Anchor if not mock
-		if (!virtualAccount.isMock && virtualAccount.anchorReference) {
+		// ✅ Refresh account details from Anchor
+		if (virtualAccount.anchorReference) {
 			try {
 				const accountDetails = await anchorService.getDepositAccount(
 					virtualAccount.anchorReference,
 				);
 
 				if (accountDetails.success && accountDetails.account) {
-					// Update with latest data
-					if (accountDetails.account.accountNumber) {
-						virtualAccount.accountNumber = accountDetails.account.accountNumber;
+					const updatedAccount = accountDetails.account;
+					let needsUpdate = false;
+
+					// ✅ Update with real data from Anchor - NO DUMMY DATA
+					if (
+						updatedAccount.accountNumber &&
+						updatedAccount.accountNumber !== "pending"
+					) {
+						virtualAccount.accountNumber = updatedAccount.accountNumber;
+						needsUpdate = true;
 					}
-					if (accountDetails.account.bankName) {
-						virtualAccount.bankName = accountDetails.account.bankName;
+
+					if (updatedAccount.bankName) {
+						virtualAccount.bankName = updatedAccount.bankName;
+						needsUpdate = true;
 					}
-					await virtualAccount.save();
-					console.log(
-						`✅ Account details refreshed: ${virtualAccount.accountNumber}`,
-					);
+
+					if (updatedAccount.bankCode) {
+						virtualAccount.bankCode = updatedAccount.bankCode;
+						needsUpdate = true;
+					}
+
+					if (updatedAccount.accountName) {
+						virtualAccount.accountName = updatedAccount.accountName;
+						needsUpdate = true;
+					}
+
+					if (needsUpdate) {
+						await virtualAccount.save();
+						console.log(`✅ Account details refreshed:`, {
+							accountNumber: virtualAccount.accountNumber,
+							bankName: virtualAccount.bankName,
+							bankCode: virtualAccount.bankCode,
+						});
+					}
 				}
 			} catch (err) {
 				console.log("⚠️ Could not refresh account details:", err.message);
 			}
 		}
 
+		// ✅ Return the account with real bank details
 		res.status(200).json({
 			success: true,
 			account: {
 				id: virtualAccount._id,
 				accountNumber: virtualAccount.accountNumber,
-				bankName: virtualAccount.bankName,
+				bankName: virtualAccount.bankName, // ✅ REAL bank name
+				bankCode: virtualAccount.bankCode, // ✅ REAL bank code
 				accountName: virtualAccount.accountName,
 				isActive: virtualAccount.isActive,
 				isMock: virtualAccount.isMock || false,
+				currency: virtualAccount.currency || "NGN",
 			},
 		});
 	} catch (error) {

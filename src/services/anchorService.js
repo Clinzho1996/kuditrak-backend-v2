@@ -469,6 +469,8 @@ export const getDepositAccounts = async (customerId) => {
  * Get a single deposit account by ID
  * ✅ FIXED: Using correct endpoint
  */
+// backend/services/anchorService.js - Fixed getDepositAccount
+
 export const getDepositAccount = async (accountId) => {
 	try {
 		console.log(`🔍 Fetching deposit account: ${accountId}`);
@@ -479,24 +481,95 @@ export const getDepositAccount = async (accountId) => {
 			`/accounts/${accountId}?include=AccountNumber`,
 		);
 
-		console.log("📥 Get deposit account response:", response.data);
+		console.log(
+			"📥 Get deposit account response:",
+			JSON.stringify(response.data, null, 2),
+		);
 
 		if (response.data?.data) {
 			const account = response.data.data;
 			const attributes = account.attributes || {};
 			const included = response.data.included || [];
 
-			// Find account number in included
+			// ✅ Extract account number and bank details from included
 			let accountNumber = null;
-			let bankName = "Anchor Bank";
+			let bankName = null;
+			let bankCode = null;
+			let accountName = null;
+			let currency = "NGN";
+			let status = "ACTIVE";
+
 			for (const item of included) {
-				if (item.type === "AccountNumber") {
+				if (item.type === "AccountNumber" || item.type === "VirtualNuban") {
 					const itemAttributes = item.attributes || {};
-					accountNumber = itemAttributes.accountNumber || itemAttributes.number;
-					bankName = itemAttributes.bankName || "Anchor Bank";
+
+					// ✅ Get the full unmasked account number
+					if (itemAttributes.accountNumber) {
+						accountNumber = itemAttributes.accountNumber;
+					}
+
+					// ✅ Get bank details from AccountNumber
+					if (itemAttributes.bank) {
+						const bank = itemAttributes.bank;
+						if (bank.name) {
+							bankName = bank.name;
+						}
+						if (bank.code) {
+							bankCode = bank.code;
+						}
+					}
+
+					// ✅ Get account name
+					if (itemAttributes.name) {
+						accountName = itemAttributes.name;
+					}
+
+					// ✅ Get currency and status
+					if (itemAttributes.currency) {
+						currency = itemAttributes.currency;
+					}
+					if (itemAttributes.status) {
+						status = itemAttributes.status;
+					}
+
 					break;
 				}
 			}
+
+			// ✅ If bank details not found in included, try attributes
+			if (!bankName && attributes.bank) {
+				const bank = attributes.bank;
+				if (bank.name) {
+					bankName = bank.name;
+				}
+				if (bank.code || bank.nipCode) {
+					bankCode = bank.code || bank.nipCode;
+				}
+			}
+
+			// ✅ If bank details still not found, use null (not "Anchor Bank")
+			if (!bankName) {
+				console.warn("⚠️ No bank name found in Anchor response");
+				// ⚠️ DO NOT use "Anchor Bank" - use null
+			}
+
+			// ✅ If account number is still masked, try attributes
+			if (!accountNumber || accountNumber.includes("*")) {
+				if (
+					attributes.accountNumber &&
+					!attributes.accountNumber.includes("*")
+				) {
+					accountNumber = attributes.accountNumber;
+				}
+			}
+
+			console.log(`📊 Extracted account details:`);
+			console.log(`   Account Number: ${accountNumber}`);
+			console.log(`   Bank Name: ${bankName}`);
+			console.log(`   Bank Code: ${bankCode}`);
+			console.log(`   Account Name: ${accountName}`);
+			console.log(`   Currency: ${currency}`);
+			console.log(`   Status: ${status}`);
 
 			return {
 				success: true,
@@ -504,11 +577,13 @@ export const getDepositAccount = async (accountId) => {
 					id: account.id,
 					accountId: account.id,
 					productName: attributes.productName,
-					status: attributes.status,
-					balance: attributes.balance || 0,
-					currency: attributes.currency || "NGN",
-					accountNumber: accountNumber || attributes.accountNumber,
-					bankName: bankName || attributes.bankName || "Anchor Bank",
+					status: attributes.status || status,
+					balance: attributes.balance || attributes.availableBalance || 0,
+					currency: attributes.currency || currency,
+					accountNumber: accountNumber,
+					bankName: bankName, // ✅ Will be null if not found
+					bankCode: bankCode, // ✅ Will be null if not found
+					accountName: accountName || attributes.accountName,
 					createdAt: attributes.createdAt,
 					updatedAt: attributes.updatedAt,
 				},
@@ -568,115 +643,82 @@ export const getDepositAccountBalance = async (depositAccountId) => {
 
 // backend/services/anchorService.js
 
+// backend/services/anchorService.js - Make sure this returns bank details
+
 export const getAccountNumberForDeposit = async (depositAccountId) => {
 	try {
 		console.log(
 			`🔍 Fetching account number for deposit account: ${depositAccountId}`,
 		);
 
-		// ✅ Use the include parameter to get full account number details
 		const response = await makeAnchorRequest(
 			"get",
 			`/accounts/${depositAccountId}?include=AccountNumber,VirtualNuban`,
-		);
-
-		console.log(
-			"📥 Get account number response:",
-			JSON.stringify(response.data, null, 2),
 		);
 
 		if (response.data?.data) {
 			const account = response.data.data;
 			const attributes = account.attributes || {};
 
-			// ✅ Extract bank details from the account attributes
-			let accountNumber = attributes.accountNumber;
-			let bankName = "Anchor Bank";
-			let bankCode = "000";
-			let accountName = attributes.accountName || "Kuditrak User";
+			let accountNumber = attributes.accountNumber || null;
+			let accountName = attributes.accountName || null;
 			let currency = attributes.currency || "NGN";
 			let status = attributes.status || "ACTIVE";
+			let bankName = null;
+			let bankCode = null;
 
-			// ✅ Look for the full account number in the included data
+			// ✅ Look through included data for AccountNumber
 			const included = response.data.included || [];
-
 			for (const item of included) {
 				if (item.type === "AccountNumber" || item.type === "VirtualNuban") {
 					const itemAttributes = item.attributes || {};
 
-					// ✅ Get the full account number (not masked)
+					// ✅ Get full unmasked account number
 					if (
 						itemAttributes.accountNumber &&
-						itemAttributes.accountNumber !== "******6644"
+						!itemAttributes.accountNumber.includes("*")
 					) {
 						accountNumber = itemAttributes.accountNumber;
 					}
 
-					// ✅ Get the bank details from the AccountNumber object
+					// ✅ Get bank details
 					if (itemAttributes.bank) {
 						const bank = itemAttributes.bank;
 						if (bank.name) {
 							bankName = bank.name;
 						}
-						if (bank.code || bank.nipCode) {
-							bankCode = bank.code || bank.nipCode;
+						if (bank.code) {
+							bankCode = bank.code;
 						}
 					}
 
-					// ✅ Get the account name from the AccountNumber object
 					if (itemAttributes.name) {
 						accountName = itemAttributes.name;
 					}
-
-					// ✅ Get currency and status
 					if (itemAttributes.currency) {
 						currency = itemAttributes.currency;
 					}
 					if (itemAttributes.status) {
 						status = itemAttributes.status;
 					}
-
 					break;
 				}
 			}
 
-			// ✅ If bank details are in the deposit account attributes, use those
-			if (!bankName || bankName === "Anchor Bank") {
-				if (attributes.bank) {
-					const bank = attributes.bank;
-					if (bank.name) {
-						bankName = bank.name;
-					}
-					if (bank.code || bank.nipCode) {
-						bankCode = bank.code || bank.nipCode;
-					}
-				}
+			// ✅ If bank details not found, try attributes
+			if (!bankName && attributes.bank) {
+				const bank = attributes.bank;
+				if (bank.name) bankName = bank.name;
+				if (bank.code || bank.nipCode) bankCode = bank.code || bank.nipCode;
 			}
 
-			// ✅ Ensure we have the full account number
-			if (!accountNumber || accountNumber.includes("*")) {
-				// Try to get from attributes if still masked
-				if (
-					attributes.accountNumber &&
-					!attributes.accountNumber.includes("*")
-				) {
-					accountNumber = attributes.accountNumber;
-				}
-			}
-
-			console.log(`✅ Account details extracted:`);
-			console.log(`   Account Number: ${accountNumber}`);
-			console.log(`   Bank Name: ${bankName}`);
-			console.log(`   Bank Code: ${bankCode}`);
-			console.log(`   Account Name: ${accountName}`);
-			console.log(`   Currency: ${currency}`);
-			console.log(`   Status: ${status}`);
+			console.log(`📊 Extracted bank details: ${bankName} (${bankCode})`);
 
 			return {
 				success: true,
 				accountNumber: accountNumber,
-				bankName: bankName,
-				bankCode: bankCode,
+				bankName: bankName, // ✅ Will be "PROVIDUS BANK"
+				bankCode: bankCode, // ✅ Will be "000023"
 				accountName: accountName,
 				currency: currency,
 				status: status,
