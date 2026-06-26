@@ -864,35 +864,31 @@ export const verifyWebhookSignature = (payload, signature, timestamp) => {
 	}
 };
 
-// backend/services/anchorService.js - Add this method
-
-/**
- * ✅ Transfer between two deposit accounts (internal transfer)
- */
 export const transferBetweenAccounts = async (
 	fromAccountId,
 	toAccountId,
 	amount,
 	currency = "NGN",
-	narration = "Transfer",
+	reason = "Transfer",
 ) => {
 	try {
 		console.log(
-			`🔄 Transferring ₦${amount} from ${fromAccountId} to ${toAccountId}`,
+			`🔄 Transferring ${amount} kobo from ${fromAccountId} to ${toAccountId}`,
 		);
 
+		// ✅ Use the correct endpoint: /transfers (not /transactions)
+		// ✅ Use the correct payload structure from Anchor docs
 		const payload = {
 			data: {
-				type: "Transaction",
+				type: "BookTransfer",
 				attributes: {
 					amount: amount,
 					currency: currency,
-					narration: narration,
-					source: "wallet",
-					destination: "wallet",
+					reason: reason,
+					reference: `TRF_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
 				},
 				relationships: {
-					sourceAccount: {
+					account: {
 						data: {
 							id: fromAccountId,
 							type: "DepositAccount",
@@ -910,15 +906,23 @@ export const transferBetweenAccounts = async (
 
 		console.log("📝 Transfer payload:", JSON.stringify(payload, null, 2));
 
-		// ✅ Use Anchor's transaction endpoint
-		const response = await makeAnchorRequest("post", "/transactions", payload);
+		// ✅ Correct endpoint: /api/v1/transfers
+		const response = await makeAnchorRequest("post", "/transfers", payload);
 
 		if (response.data?.data) {
+			const transfer = response.data.data;
+			const attributes = transfer.attributes || {};
+
 			console.log(`✅ Transfer completed successfully`);
+			console.log(`   Status: ${attributes.status}`);
+			console.log(`   Reference: ${attributes.reference}`);
+
 			return {
 				success: true,
-				transactionId: response.data.data.id,
-				transaction: response.data.data,
+				transferId: transfer.id,
+				status: attributes.status,
+				reference: attributes.reference,
+				transfer: transfer,
 			};
 		}
 
@@ -929,18 +933,28 @@ export const transferBetweenAccounts = async (
 	} catch (error) {
 		console.error("❌ Transfer between accounts error:", error);
 
-		// ✅ If internal transfer fails, try using the settlement account method
-		if (error.response?.status === 404) {
-			console.log(
-				"⚠️ Internal transfer endpoint not found, trying alternative method...",
-			);
-			return await transferViaSettlement(
-				fromAccountId,
-				toAccountId,
-				amount,
-				currency,
-				narration,
-			);
+		if (error.response) {
+			console.error("Status:", error.response.status);
+			console.error("Data:", JSON.stringify(error.response.data, null, 2));
+
+			// Check for specific error cases
+			const errors = error.response.data?.errors || [];
+			for (const err of errors) {
+				if (err.detail?.includes("INSUFFICIENT_BALANCE")) {
+					return {
+						success: false,
+						error: "Insufficient balance in source account",
+						errorType: "INSUFFICIENT_BALANCE",
+					};
+				}
+				if (err.detail?.includes("INVALID_ACCOUNT")) {
+					return {
+						success: false,
+						error: "Invalid account specified",
+						errorType: "INVALID_ACCOUNT",
+					};
+				}
+			}
 		}
 
 		return handleAnchorError(error);
