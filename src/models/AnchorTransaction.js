@@ -125,6 +125,7 @@ const anchorTransactionSchema = new mongoose.Schema({
 			"goal_withdrawal",
 			"topup",
 			"deposit",
+			"goal",
 			"refund",
 			"transfer",
 			"payment",

@@ -853,6 +853,8 @@ export const allocateToGoal = async (req, res) => {
 /**
  * ✅ Withdraw funds from goal - checks User model
  */
+// backend/controllers/userGoalController.js - FIXED withdrawDesignatedFunds
+
 export const withdrawDesignatedFunds = async (req, res) => {
 	try {
 		const { id } = req.params;
@@ -870,8 +872,32 @@ export const withdrawDesignatedFunds = async (req, res) => {
 			return res.status(404).json({ error: "Goal not found" });
 		}
 
-		if (goal.allocatedAmount < amount) {
-			return res.status(400).json({ error: "Insufficient designated funds" });
+		// ✅ Check if goal has an Anchor account
+		if (!goal.goalDepositAccountId) {
+			return res.status(400).json({
+				error: "Goal has no deposit account to withdraw from",
+			});
+		}
+
+		// ✅ Get real balance from Anchor for the goal
+		const goalBalance = await anchorService.getWalletBalance(
+			goal.goalDepositAccountId,
+		);
+		if (!goalBalance.success) {
+			return res.status(500).json({
+				error: "Could not get goal balance from Anchor",
+			});
+		}
+
+		const goalBalanceInNGN = goalBalance.balance / 100;
+		console.log(`📊 Goal balance in Anchor: ₦${goalBalanceInNGN}`);
+		console.log(`📊 Goal allocated in DB: ₦${goal.allocatedAmount}`);
+
+		// ✅ Use the REAL Anchor balance for validation
+		if (goalBalanceInNGN < amount) {
+			return res.status(400).json({
+				error: `Insufficient funds. Available: ₦${goalBalanceInNGN.toLocaleString()}`,
+			});
 		}
 
 		const mainWallet = await getMainWallet(req.user._id);
@@ -896,26 +922,56 @@ export const withdrawDesignatedFunds = async (req, res) => {
 			penaltyMessage = ` Early release penalty (7%): ₦${penaltyFee.toLocaleString()} applied.`;
 		}
 
-		if (goal.allocatedAmount < totalDeduction) {
-			const maxWithdrawable = Math.floor(goal.allocatedAmount / 1.07);
+		// ✅ Check if goal has enough funds including penalty
+		if (goalBalanceInNGN < totalDeduction) {
+			const maxWithdrawable = Math.floor(goalBalanceInNGN / 1.07);
 			return res.status(400).json({
-				error: `Insufficient designated funds. Maximum withdrawable: ₦${maxWithdrawable} (₦${(maxWithdrawable * 0.07).toFixed(2)} penalty applies for early release).`,
+				error: `Insufficient funds. Maximum withdrawable: ₦${maxWithdrawable} (₦${(maxWithdrawable * 0.07).toFixed(2)} penalty applies for early release).`,
 			});
 		}
 
-		// Deduct from goal
+		// ✅ STEP 1: Transfer money from goal to main wallet in Anchor
+		console.log(`🔄 Transferring ₦${amount} from goal to main wallet...`);
+
+		const amountInKobo = Math.round(amount * 100);
+
+		const transferResult = await anchorService.transferBetweenAccounts(
+			goal.goalDepositAccountId, // Source: Goal account
+			mainWallet.walletId, // Destination: Main wallet
+			amountInKobo, // Amount in kobo
+			"NGN",
+			`Withdrawal from goal: ${goal.name}`,
+		);
+
+		if (!transferResult.success) {
+			throw new Error(
+				"Transfer failed: " + (transferResult.error || "Unknown error"),
+			);
+		}
+
+		console.log(`✅ Transfer completed: ${transferResult.transferId}`);
+
+		// ✅ STEP 2: Update local balances AFTER successful transfer
+		// Update goal allocation
 		goal.allocatedAmount -= totalDeduction;
+		if (goal.allocatedAmount < 0) goal.allocatedAmount = 0;
 		await goal.save();
 
-		// Refund to main wallet
-		const refundAmount = amount;
-		mainWallet.balance += refundAmount;
-		mainWallet.allocated = Math.max(
-			0,
-			(mainWallet.allocated || 0) - totalDeduction,
+		// Update main wallet balance
+		const updatedMainBalance = await anchorService.getWalletBalance(
+			mainWallet.walletId,
 		);
-		mainWallet.available = mainWallet.balance - mainWallet.allocated;
-		await mainWallet.save();
+		if (updatedMainBalance.success) {
+			const newBalance = updatedMainBalance.balance / 100;
+			mainWallet.balance = newBalance;
+			mainWallet.allocated = Math.max(
+				0,
+				(mainWallet.allocated || 0) - totalDeduction,
+			);
+			mainWallet.available = newBalance - mainWallet.allocated;
+			await mainWallet.save();
+			console.log(`✅ Main wallet updated: ₦${mainWallet.balance}`);
+		}
 
 		// Create withdrawal record
 		await AllocationRecord.create({
@@ -932,10 +988,11 @@ export const withdrawDesignatedFunds = async (req, res) => {
 				isEarlyRelease: isEarlyRelease,
 				userEmail: user.email,
 				userName: user.fullName,
+				anchorTransferId: transferResult.transferId,
 			},
 		});
 
-		// Create transaction record
+		// Create transaction record for the refund
 		await AnchorTransaction.create({
 			userId: req.user._id,
 			anchorCustomerId: user.anchorCustomerId,
@@ -954,10 +1011,11 @@ export const withdrawDesignatedFunds = async (req, res) => {
 				penaltyApplied: penaltyFee,
 				totalDeduction: totalDeduction,
 				userEmail: user.email,
+				anchorTransferId: transferResult.transferId,
 			},
 		});
 
-		// If penalty was applied, collect it
+		// If penalty was applied, record it
 		if (penaltyFee > 0) {
 			await AnchorTransaction.create({
 				userId: req.user._id,
@@ -977,6 +1035,7 @@ export const withdrawDesignatedFunds = async (req, res) => {
 					penaltyAmount: penaltyFee,
 					withdrawAmount: amount,
 					userEmail: user.email,
+					anchorTransferId: transferResult.transferId,
 				},
 			});
 		}
@@ -984,8 +1043,8 @@ export const withdrawDesignatedFunds = async (req, res) => {
 		await sendPushToUser(
 			req.user._id,
 			"💸 Withdrawal Successful",
-			`₦${refundAmount.toLocaleString()} withdrawn from ${goal.name}${penaltyMessage}`,
-			{ type: "goal_withdrawn", goalId: goal._id, amount: refundAmount },
+			`₦${amount.toLocaleString()} withdrawn from ${goal.name}${penaltyMessage}`,
+			{ type: "goal_withdrawn", goalId: goal._id, amount: amount },
 		);
 
 		res.status(200).json({
@@ -994,6 +1053,7 @@ export const withdrawDesignatedFunds = async (req, res) => {
 			data: goal,
 			withdrawAmount: amount,
 			penaltyApplied: penaltyFee,
+			anchorTransferId: transferResult.transferId,
 			user: {
 				id: user._id,
 				fullName: user.fullName,
