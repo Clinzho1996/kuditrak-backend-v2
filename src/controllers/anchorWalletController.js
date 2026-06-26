@@ -944,47 +944,217 @@ export const createVirtualAccount = async (req, res) => {
 		const userId = req.user._id;
 		const { currency = "NGN" } = req.body;
 
+		console.log("🔵 Creating virtual account for user:", userId);
+
+		// Get Anchor customer
 		const anchorCustomer = await AnchorCustomer.findOne({ userId });
 		if (!anchorCustomer) {
 			return res.status(404).json({
 				success: false,
-				error: "Anchor customer not found",
+				error: "Anchor customer not found. Please complete KYC first.",
 			});
 		}
 
-		const wallet = await AnchorWallet.findOne({ userId, walletType: "main" });
-		if (!wallet) {
-			return res.status(404).json({
+		console.log(`✅ Anchor customer found: ${anchorCustomer.anchorCustomerId}`);
+		console.log(`   KYC Level: ${anchorCustomer.kycLevel}`);
+
+		// Check if KYC is completed
+		if (anchorCustomer.kycLevel === "TIER_0") {
+			return res.status(403).json({
 				success: false,
-				error: "Wallet not found",
+				error: "KYC verification required to create virtual account",
+				message: "Please complete KYC verification first",
+				requiresKYC: true,
 			});
 		}
 
-		const nubanResponse = await anchorService.createVirtualNuban(
-			wallet.walletId,
-			{ userId: userId.toString(), currency },
+		// Get user's wallet
+		let wallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
+
+		if (!wallet) {
+			console.log("⚠️ No wallet found, creating one...");
+			const result = await createWalletInternal(userId);
+			if (!result.success) {
+				return res.status(404).json({
+					success: false,
+					error: "Wallet not found and could not be created",
+					message: result.error || "Please try again later",
+				});
+			}
+			wallet = result.wallet;
+			console.log(`✅ Wallet created: ${wallet.walletId}`);
+		}
+
+		// Check if virtual account already exists in local DB
+		const existingVirtualAccount = await AnchorVirtualAccount.findOne({
+			userId,
+			isActive: true,
+		});
+
+		if (existingVirtualAccount) {
+			console.log(
+				`✅ Virtual account already exists: ${existingVirtualAccount.accountNumber}`,
+			);
+			return res.status(200).json({
+				success: true,
+				message: "Virtual account already exists",
+				virtualAccount: {
+					id: existingVirtualAccount._id,
+					accountNumber: existingVirtualAccount.accountNumber,
+					bankName: existingVirtualAccount.bankName,
+					accountName: existingVirtualAccount.accountName,
+					currency: existingVirtualAccount.currency || "NGN",
+					isActive: existingVirtualAccount.isActive,
+				},
+			});
+		}
+
+		// ✅ STEP 1: Check if deposit account exists in Anchor
+		let depositAccountId = null;
+		try {
+			console.log("🔍 Checking for existing deposit accounts in Anchor...");
+			const accountsResponse = await anchorService.getDepositAccounts(
+				anchorCustomer.anchorCustomerId,
+			);
+
+			if (accountsResponse.success && accountsResponse.accounts?.length > 0) {
+				const existingAcc = accountsResponse.accounts[0];
+				depositAccountId = existingAcc.id || existingAcc.accountId;
+				console.log(`✅ Found existing deposit account: ${depositAccountId}`);
+			}
+		} catch (err) {
+			console.log("⚠️ Could not check existing accounts:", err.message);
+		}
+
+		// ✅ STEP 2: Create deposit account if none exists
+		if (!depositAccountId) {
+			console.log("📝 Creating new deposit account in Anchor...");
+
+			const accountResponse = await anchorService.createDepositAccount(
+				anchorCustomer.anchorCustomerId,
+				"SAVINGS",
+				{
+					userId: userId.toString(),
+					platform: "kuditrak",
+					currency: currency,
+					created_after_kyc: true,
+				},
+			);
+
+			if (!accountResponse.success) {
+				console.error(
+					"❌ Failed to create deposit account:",
+					accountResponse.error,
+				);
+				return res.status(400).json({
+					success: false,
+					error:
+						accountResponse.error ||
+						"Failed to create deposit account in Anchor",
+				});
+			}
+
+			depositAccountId = accountResponse.accountId;
+			console.log(`✅ Deposit account created: ${depositAccountId}`);
+		}
+
+		// ✅ STEP 3: Get account number using the correct endpoint
+		console.log(
+			`📝 Getting account number for deposit account: ${depositAccountId}`,
 		);
 
-		if (!nubanResponse.success) {
-			return res.status(400).json({
-				success: false,
-				error: nubanResponse.error,
-			});
+		const accountNumberResponse =
+			await anchorService.getAccountNumberForDeposit(depositAccountId);
+
+		let accountNumber;
+		let bankName = "Anchor Bank";
+		let accountName = req.user.fullName || "Kuditrak User";
+
+		if (!accountNumberResponse.success) {
+			console.error(
+				"❌ Failed to get account number:",
+				accountNumberResponse.error,
+			);
+
+			// Try alternative method: get account details with include
+			try {
+				console.log("📝 Trying alternative method to get account number...");
+				const accountDetails =
+					await anchorService.getDepositAccount(depositAccountId);
+				if (accountDetails.success && accountDetails.account) {
+					accountNumber = accountDetails.account.accountNumber;
+					bankName = accountDetails.account.bankName || "Anchor Bank";
+					console.log(
+						`✅ Account number retrieved via include: ${accountNumber}`,
+					);
+				}
+			} catch (err) {
+				console.log("⚠️ Alternative method also failed:", err.message);
+			}
+
+			if (!accountNumber) {
+				return res.status(400).json({
+					success: false,
+					error:
+						accountNumberResponse.error ||
+						"Failed to get account number from Anchor",
+				});
+			}
+		} else {
+			accountNumber = accountNumberResponse.accountNumber;
+			bankName = accountNumberResponse.bankName || "Anchor Bank";
+			accountName =
+				accountNumberResponse.accountName ||
+				req.user.fullName ||
+				"Kuditrak User";
+			console.log(`✅ Account number retrieved: ${accountNumber}`);
 		}
 
+		// ✅ STEP 4: Save virtual account to database
 		const virtualAccount = await AnchorVirtualAccount.create({
 			userId,
 			anchorCustomerId: anchorCustomer.anchorCustomerId,
 			walletId: wallet._id,
-			accountNumber: nubanResponse.accountNumber,
-			bankName: nubanResponse.bankName,
-			accountName: nubanResponse.accountName,
-			bankCode: nubanResponse.bankCode,
-			anchorReference: nubanResponse.virtualNubanId,
+			accountNumber: accountNumber,
+			bankName: bankName,
+			bankCode: "000",
+			accountName: accountName,
+			anchorReference: depositAccountId,
 			isActive: true,
+			isMock: false,
 			provider: "anchor",
-			currency: currency,
+			currency: currency || "NGN",
 		});
+
+		console.log(`✅ Virtual account saved: ${virtualAccount.accountNumber}`);
+
+		// ✅ STEP 5: Update wallet with account number
+		wallet.accountNumber = virtualAccount.accountNumber;
+		wallet.bankName = virtualAccount.bankName;
+		wallet.walletId = depositAccountId;
+		wallet.isLocal = false;
+		await wallet.save();
+
+		console.log("✅ Wallet updated with Anchor data");
+
+		// ✅ STEP 6: Send notification
+		try {
+			await sendPushToUser(
+				userId,
+				"🏦 Virtual Account Created",
+				`Your virtual account ${virtualAccount.accountNumber} (${virtualAccount.bankName}) is ready to receive money.`,
+				{
+					type: "virtual_account_created",
+					accountNumber: virtualAccount.accountNumber,
+					bankName: virtualAccount.bankName,
+				},
+			);
+		} catch (pushError) {
+			console.log("⚠️ Push notification error:", pushError.message);
+		}
 
 		res.status(201).json({
 			success: true,
@@ -994,13 +1164,17 @@ export const createVirtualAccount = async (req, res) => {
 				accountNumber: virtualAccount.accountNumber,
 				bankName: virtualAccount.bankName,
 				accountName: virtualAccount.accountName,
-				currency: virtualAccount.currency,
+				currency: virtualAccount.currency || "NGN",
 				isActive: virtualAccount.isActive,
 			},
 		});
 	} catch (error) {
-		console.error("Create virtual account error:", error);
-		res.status(500).json({ error: error.message });
+		console.error("❌ Create virtual account error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+			message: "Failed to create virtual account",
+		});
 	}
 };
 
