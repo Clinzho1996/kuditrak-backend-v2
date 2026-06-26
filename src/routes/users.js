@@ -28,6 +28,8 @@ import {
 } from "../controllers/userContoller.js";
 import protect from "../middleware/auth.js";
 import upload from "../middleware/upload.js";
+import AnchorCustomer from "../models/AnchorCustomer.js";
+import anchorService from "../services/anchorService.js";
 
 const router = express.Router();
 
@@ -96,6 +98,55 @@ router.post("/virtual-account/create", protect, async (req, res, next) => {
 			success: false,
 			error: error.message,
 		});
+	}
+});
+
+// backend/routes/userRoutes.js - Add this debug route
+
+router.get("/debug/check-anchor-kyc", protect, async (req, res) => {
+	try {
+		const userId = req.user._id;
+
+		const anchorCustomer = await AnchorCustomer.findOne({ userId });
+		if (!anchorCustomer) {
+			return res.json({
+				success: false,
+				message: "No Anchor customer found",
+				localKyc: "none",
+			});
+		}
+
+		// Fetch fresh status from Anchor
+		const customerResponse = await anchorService.getAnchorCustomer(
+			anchorCustomer.anchorCustomerId,
+		);
+
+		res.json({
+			success: true,
+			local: {
+				anchorCustomerId: anchorCustomer.anchorCustomerId,
+				kycLevel: anchorCustomer.kycLevel,
+				kycStatus: anchorCustomer.kycStatus,
+				verificationId: anchorCustomer.currentVerificationId,
+			},
+			anchor: customerResponse.success
+				? {
+						kycLevel: customerResponse.kycLevel,
+						kycStatus: customerResponse.kycStatus,
+						customer: customerResponse.customer,
+					}
+				: {
+						error: customerResponse.error,
+					},
+			user: {
+				hasBvn: !!req.user.kyc?.bvn,
+				hasDateOfBirth: !!req.user.kyc?.dateOfBirth,
+				hasGender: !!req.user.kyc?.gender,
+				isVerified: req.user.kyc?.isVerified,
+			},
+		});
+	} catch (error) {
+		res.status(500).json({ error: error.message });
 	}
 });
 

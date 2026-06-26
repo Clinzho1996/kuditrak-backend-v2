@@ -939,6 +939,8 @@ export const listVirtualAccounts = async (req, res) => {
 	}
 };
 
+// backend/controllers/anchorWalletController.js - Update createVirtualAccount
+
 export const createVirtualAccount = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -947,7 +949,7 @@ export const createVirtualAccount = async (req, res) => {
 		console.log("🔵 Creating virtual account for user:", userId);
 
 		// Get Anchor customer
-		const anchorCustomer = await AnchorCustomer.findOne({ userId });
+		let anchorCustomer = await AnchorCustomer.findOne({ userId });
 		if (!anchorCustomer) {
 			return res.status(404).json({
 				success: false,
@@ -956,17 +958,127 @@ export const createVirtualAccount = async (req, res) => {
 		}
 
 		console.log(`✅ Anchor customer found: ${anchorCustomer.anchorCustomerId}`);
-		console.log(`   KYC Level: ${anchorCustomer.kycLevel}`);
+		console.log(`   Local KYC Level: ${anchorCustomer.kycLevel}`);
 
-		// Check if KYC is completed
-		if (anchorCustomer.kycLevel === "TIER_0") {
-			return res.status(403).json({
+		// Get user details
+		const user = await User.findById(userId);
+		if (!user) {
+			return res.status(404).json({
 				success: false,
-				error: "KYC verification required to create virtual account",
-				message: "Please complete KYC verification first",
-				requiresKYC: true,
+				error: "User not found",
 			});
 		}
+
+		// ✅ CRITICAL: Check if KYC needs to be submitted to Anchor
+		// First, check with Anchor directly to get the real status
+		let anchorKycStatus = null;
+		try {
+			const customerResponse = await anchorService.getAnchorCustomer(
+				anchorCustomer.anchorCustomerId,
+			);
+			if (customerResponse.success) {
+				anchorKycStatus = customerResponse;
+				console.log(`📊 Anchor KYC Status:`, {
+					kycLevel: customerResponse.kycLevel,
+					kycStatus: customerResponse.kycStatus,
+				});
+			}
+		} catch (err) {
+			console.log("⚠️ Could not fetch KYC status from Anchor:", err.message);
+		}
+
+		// Check if KYC is actually completed in Anchor
+		const isKycCompletedInAnchor =
+			anchorKycStatus?.kycLevel === "TIER_1" ||
+			anchorKycStatus?.kycLevel === "TIER_2";
+
+		if (!isKycCompletedInAnchor) {
+			console.log(
+				"⚠️ KYC not completed in Anchor. Attempting to submit KYC...",
+			);
+
+			// Check if we have the required KYC data
+			const bvn = user.kyc?.bvn;
+			const dateOfBirth = user.kyc?.dateOfBirth;
+			const gender = user.kyc?.gender;
+
+			if (!bvn || !dateOfBirth || !gender) {
+				console.log("❌ Missing KYC data:", {
+					bvn: !!bvn,
+					dateOfBirth: !!dateOfBirth,
+					gender: !!gender,
+				});
+				return res.status(400).json({
+					success: false,
+					error: "KYC data incomplete. Please complete your KYC first.",
+					requiresKYC: true,
+					missing: {
+						bvn: !bvn,
+						dateOfBirth: !dateOfBirth,
+						gender: !gender,
+					},
+				});
+			}
+
+			const formattedDate =
+				dateOfBirth instanceof Date
+					? dateOfBirth.toISOString().split("T")[0]
+					: new Date(dateOfBirth).toISOString().split("T")[0];
+
+			console.log(
+				`📤 Submitting KYC to Anchor: BVN=${bvn}, DOB=${formattedDate}, Gender=${gender}`,
+			);
+
+			// Submit KYC to Anchor
+			const upgradeResult = await anchorService.upgradeCustomerKYC(
+				anchorCustomer.anchorCustomerId,
+				bvn,
+				formattedDate,
+				gender,
+			);
+
+			if (!upgradeResult.success) {
+				console.error("❌ KYC submission failed:", upgradeResult.error);
+				return res.status(400).json({
+					success: false,
+					error: upgradeResult.error || "Failed to submit KYC to Anchor",
+					requiresKYC: true,
+				});
+			}
+
+			console.log(
+				`✅ KYC submitted to Anchor: ${upgradeResult.verificationId}`,
+			);
+			console.log(`   Status: ${upgradeResult.status}`);
+
+			// Update local records
+			anchorCustomer.kycLevel = "TIER_1";
+			anchorCustomer.kycStatus = upgradeResult.status || "pending";
+			anchorCustomer.currentVerificationId = upgradeResult.verificationId;
+			anchorCustomer.identificationLevel2 = { bvn, dateOfBirth, gender };
+			await anchorCustomer.save();
+
+			user.anchorKycLevel = "TIER_1";
+			user.kyc.anchorVerificationId = upgradeResult.verificationId;
+			user.kyc.paystackValidationPending = true;
+			await user.save();
+
+			// If KYC is pending, return waiting status
+			if (upgradeResult.status === "pending") {
+				return res.status(202).json({
+					success: false,
+					error:
+						"KYC verification submitted. Please wait for approval before creating a virtual account.",
+					requiresKYC: true,
+					kycPending: true,
+					verificationId: upgradeResult.verificationId,
+					message: "You will receive a notification when your KYC is approved.",
+				});
+			}
+		}
+
+		// ✅ Now KYC should be completed, proceed with virtual account creation
+		console.log(`✅ KYC completed - Proceeding with virtual account creation`);
 
 		// Get user's wallet
 		let wallet = await AnchorWallet.findOne({
@@ -1071,7 +1183,7 @@ export const createVirtualAccount = async (req, res) => {
 
 		let accountNumber;
 		let bankName = "Anchor Bank";
-		let accountName = req.user.fullName || "Kuditrak User";
+		let accountName = user.fullName || "Kuditrak User";
 
 		if (!accountNumberResponse.success) {
 			console.error(
@@ -1107,9 +1219,7 @@ export const createVirtualAccount = async (req, res) => {
 			accountNumber = accountNumberResponse.accountNumber;
 			bankName = accountNumberResponse.bankName || "Anchor Bank";
 			accountName =
-				accountNumberResponse.accountName ||
-				req.user.fullName ||
-				"Kuditrak User";
+				accountNumberResponse.accountName || user.fullName || "Kuditrak User";
 			console.log(`✅ Account number retrieved: ${accountNumber}`);
 		}
 
