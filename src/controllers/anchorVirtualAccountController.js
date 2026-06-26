@@ -10,6 +10,8 @@ import { sendPushToUser } from "../services/pushService.js";
  */
 // backend/controllers/anchorVirtualAccountController.js - Remove mock fallback
 
+// backend/controllers/anchorVirtualAccountController.js - Update createDepositAccount
+
 export const createDepositAccount = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -27,6 +29,7 @@ export const createDepositAccount = async (req, res) => {
 		}
 
 		console.log(`✅ Anchor customer found: ${anchorCustomer.anchorCustomerId}`);
+		console.log(`   KYC Level: ${anchorCustomer.kycLevel}`);
 
 		// Check if KYC is completed
 		if (anchorCustomer.kycLevel === "TIER_0") {
@@ -34,6 +37,7 @@ export const createDepositAccount = async (req, res) => {
 				success: false,
 				error: "KYC verification required to create deposit account",
 				message: "Please complete KYC verification first",
+				requiresKYC: true,
 			});
 		}
 
@@ -45,8 +49,6 @@ export const createDepositAccount = async (req, res) => {
 			const accountsResponse = await anchorService.getDepositAccounts(
 				anchorCustomer.anchorCustomerId,
 			);
-
-			console.log("📊 Anchor accounts response:", accountsResponse);
 
 			if (accountsResponse.success && accountsResponse.accounts) {
 				const accounts = accountsResponse.accounts;
@@ -72,6 +74,7 @@ export const createDepositAccount = async (req, res) => {
 				`✅ Found local account: ${existingLocalAccount.accountNumber}`,
 			);
 
+			// If we have an Anchor account ID but the local account doesn't have it, update it
 			if (anchorAccountId && !existingLocalAccount.anchorReference) {
 				existingLocalAccount.anchorReference = anchorAccountId;
 				await existingLocalAccount.save();
@@ -144,13 +147,17 @@ export const createDepositAccount = async (req, res) => {
 			});
 		}
 
-		// ✅ STEP 4: No account exists - create new one
+		// ✅ STEP 4: No account exists - create new one in Anchor
 		console.log("🆕 Creating new deposit account with Anchor...");
 
 		const accountResponse = await anchorService.createDepositAccount(
 			anchorCustomer.anchorCustomerId,
 			productName,
-			{ userId: userId.toString(), platform: "kuditrak", ...metadata },
+			{
+				userId: userId.toString(),
+				platform: "kuditrak",
+				...metadata,
+			},
 		);
 
 		if (!accountResponse.success) {
@@ -158,21 +165,29 @@ export const createDepositAccount = async (req, res) => {
 				"❌ Anchor account creation failed:",
 				accountResponse.error,
 			);
+
+			// ❌ DON'T create a local wallet - return the error
 			return res.status(400).json({
 				success: false,
 				error:
 					accountResponse.error || "Failed to create deposit account in Anchor",
+				details: accountResponse.details || null,
 			});
 		}
 
 		const newAccountId = accountResponse.accountId;
 		console.log(`✅ Anchor account created: ${newAccountId}`);
 
-		// Create virtual NUBAN
-		const nubanResponse = await anchorService.createVirtualNuban(newAccountId, {
-			userId: userId.toString(),
-			platform: "kuditrak",
-		});
+		// ✅ STEP 5: Create virtual NUBAN with the REAL Anchor account ID
+		console.log(`📝 Creating virtual NUBAN for account: ${newAccountId}`);
+
+		const nubanResponse = await anchorService.createVirtualNuban(
+			newAccountId, // ✅ Use the REAL Anchor deposit account ID
+			{
+				userId: userId.toString(),
+				platform: "kuditrak",
+			},
+		);
 
 		if (!nubanResponse.success) {
 			console.error("❌ Virtual NUBAN creation failed:", nubanResponse.error);
@@ -184,8 +199,10 @@ export const createDepositAccount = async (req, res) => {
 		}
 
 		console.log(`✅ Virtual NUBAN created: ${nubanResponse.accountNumber}`);
+		console.log(`   Bank: ${nubanResponse.bankName}`);
+		console.log(`   Account Name: ${nubanResponse.accountName}`);
 
-		// Save to local database
+		// ✅ STEP 6: Save to local database
 		const virtualAccount = await AnchorVirtualAccount.create({
 			userId,
 			anchorCustomerId: anchorCustomer.anchorCustomerId,
@@ -194,11 +211,42 @@ export const createDepositAccount = async (req, res) => {
 			bankName: nubanResponse.bankName || "Anchor Bank",
 			bankCode: nubanResponse.bankCode || "000",
 			accountName: req.user.fullName || "Kuditrak User",
-			anchorReference: newAccountId,
+			anchorReference: newAccountId, // ✅ Store the REAL Anchor ID
 			isActive: true,
 			isMock: false,
 		});
 
+		// ✅ STEP 7: Create or update wallet with REAL Anchor data
+		let wallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
+
+		if (!wallet) {
+			wallet = await AnchorWallet.create({
+				userId,
+				anchorCustomerId: anchorCustomer.anchorCustomerId,
+				walletId: newAccountId, // ✅ Use the REAL Anchor ID
+				walletType: "main",
+				balance: 0,
+				name: "Main Wallet",
+				currency: "NGN",
+				status: "active",
+				accountNumber: virtualAccount.accountNumber,
+				bankName: virtualAccount.bankName,
+				isLocal: false,
+			});
+			console.log(`✅ Wallet created with Anchor ID: ${wallet.walletId}`);
+		} else {
+			wallet.walletId = newAccountId;
+			wallet.accountNumber = virtualAccount.accountNumber;
+			wallet.bankName = virtualAccount.bankName;
+			wallet.isLocal = false;
+			await wallet.save();
+			console.log("✅ Wallet updated with Anchor data");
+		}
+
+		// ✅ STEP 8: Send notification
 		await sendPushToUser(
 			userId,
 			"🏦 Virtual Account Created",
