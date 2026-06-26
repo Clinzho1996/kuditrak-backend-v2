@@ -850,9 +850,6 @@ export const allocateToGoal = async (req, res) => {
 	}
 };
 
-/**
- * ✅ Withdraw funds from goal - checks User model
- */
 // backend/controllers/userGoalController.js - FIXED withdrawDesignatedFunds
 
 export const withdrawDesignatedFunds = async (req, res) => {
@@ -866,16 +863,72 @@ export const withdrawDesignatedFunds = async (req, res) => {
 
 		const user = await getUserWithAnchorData(req.user._id);
 
-		const goal = await UserGoal.findOne({ _id: id, userId: req.user._id });
+		let goal = await UserGoal.findOne({ _id: id, userId: req.user._id });
 
 		if (!goal) {
 			return res.status(404).json({ error: "Goal not found" });
 		}
 
-		// ✅ Check if goal has an Anchor account
+		// ✅ If the goal doesn't have a deposit account ID, check if it has funds in allocatedAmount
 		if (!goal.goalDepositAccountId) {
-			return res.status(400).json({
-				error: "Goal has no deposit account to withdraw from",
+			console.log(
+				"⚠️ Goal has no deposit account ID, checking allocated amount...",
+			);
+
+			// ✅ If there are no allocated funds, return error
+			if (goal.allocatedAmount <= 0) {
+				return res.status(400).json({
+					error: "No funds to withdraw",
+					message: "This goal has no funds allocated.",
+				});
+			}
+
+			// ✅ If there are allocated funds but no account, we need to find the account in Anchor
+			console.log("🔍 Searching for goal account in Anchor...");
+
+			const anchorCustomer = await getOrCreateAnchorCustomer(req.user._id);
+			if (anchorCustomer.success) {
+				const accountsResponse = await anchorService.getDepositAccounts(
+					anchorCustomer.customerId,
+				);
+
+				if (accountsResponse.success && accountsResponse.accounts) {
+					// Find account with matching goalId in metadata
+					for (const account of accountsResponse.accounts) {
+						const metadata = account.metadata || {};
+						if (metadata.goalId === goal._id.toString()) {
+							const foundAccountId = account.id || account.accountId;
+							console.log(`✅ Found goal account in Anchor: ${foundAccountId}`);
+
+							// ✅ Save it to the goal
+							goal.goalDepositAccountId = foundAccountId;
+							await goal.save();
+							break;
+						}
+					}
+				}
+			}
+
+			// ✅ If still no account ID, we need to create one
+			if (!goal.goalDepositAccountId) {
+				console.log("🏦 Creating new goal deposit account...");
+				const createResult = await createGoalDepositAccount(req.user._id, goal);
+				if (!createResult.success) {
+					return res.status(500).json({
+						error: "Failed to create goal account",
+						message: "Please try again or contact support.",
+					});
+				}
+				// Re-fetch the goal after creation
+				goal = await UserGoal.findById(id);
+			}
+		}
+
+		// ✅ Now we should have a goalDepositAccountId
+		if (!goal.goalDepositAccountId) {
+			return res.status(500).json({
+				error: "Goal account not found",
+				message: "Unable to locate or create a deposit account for this goal.",
 			});
 		}
 
@@ -883,14 +936,19 @@ export const withdrawDesignatedFunds = async (req, res) => {
 		const goalBalance = await anchorService.getWalletBalance(
 			goal.goalDepositAccountId,
 		);
-		if (!goalBalance.success) {
-			return res.status(500).json({
-				error: "Could not get goal balance from Anchor",
-			});
+		let goalBalanceInNGN = 0;
+
+		if (goalBalance.success) {
+			goalBalanceInNGN = goalBalance.balance / 100;
+		} else {
+			// If we can't get the balance from Anchor, use the allocated amount from DB
+			console.log(
+				"⚠️ Could not get balance from Anchor, using DB allocated amount",
+			);
+			goalBalanceInNGN = goal.allocatedAmount;
 		}
 
-		const goalBalanceInNGN = goalBalance.balance / 100;
-		console.log(`📊 Goal balance in Anchor: ₦${goalBalanceInNGN}`);
+		console.log(`📊 Goal balance: ₦${goalBalanceInNGN}`);
 		console.log(`📊 Goal allocated in DB: ₦${goal.allocatedAmount}`);
 
 		// ✅ Use the REAL Anchor balance for validation
@@ -930,15 +988,15 @@ export const withdrawDesignatedFunds = async (req, res) => {
 			});
 		}
 
-		// ✅ STEP 1: Transfer money from goal to main wallet in Anchor
+		// ✅ Transfer money from goal to main wallet in Anchor
 		console.log(`🔄 Transferring ₦${amount} from goal to main wallet...`);
 
 		const amountInKobo = Math.round(amount * 100);
 
 		const transferResult = await anchorService.transferBetweenAccounts(
-			goal.goalDepositAccountId, // Source: Goal account
-			mainWallet.walletId, // Destination: Main wallet
-			amountInKobo, // Amount in kobo
+			goal.goalDepositAccountId,
+			mainWallet.walletId,
+			amountInKobo,
 			"NGN",
 			`Withdrawal from goal: ${goal.name}`,
 		);
@@ -951,13 +1009,11 @@ export const withdrawDesignatedFunds = async (req, res) => {
 
 		console.log(`✅ Transfer completed: ${transferResult.transferId}`);
 
-		// ✅ STEP 2: Update local balances AFTER successful transfer
-		// Update goal allocation
+		// ✅ Update local balances
 		goal.allocatedAmount -= totalDeduction;
 		if (goal.allocatedAmount < 0) goal.allocatedAmount = 0;
 		await goal.save();
 
-		// Update main wallet balance
 		const updatedMainBalance = await anchorService.getWalletBalance(
 			mainWallet.walletId,
 		);
@@ -992,12 +1048,12 @@ export const withdrawDesignatedFunds = async (req, res) => {
 			},
 		});
 
-		// Create transaction record for the refund
+		// Create transaction record
 		await AnchorTransaction.create({
 			userId: req.user._id,
 			anchorCustomerId: user.anchorCustomerId,
 			walletId: mainWallet._id,
-			amount: refundAmount,
+			amount: amount,
 			currency: "NGN",
 			type: "credit",
 			category: "withdrawal",
