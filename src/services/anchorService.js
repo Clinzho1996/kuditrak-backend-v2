@@ -1,4 +1,4 @@
-// backend/services/anchorService.js - Fixed with correct endpoints
+// backend/services/anchorService.js - Fixed with correct Anchor API endpoints
 
 import axios from "axios";
 import crypto from "crypto";
@@ -214,7 +214,6 @@ export const createAnchorCustomerWithKYC = async (userData) => {
 
 /**
  * Upgrade customer KYC from Tier 0 to Tier 1
- * ✅ FIXED: Use the correct verification endpoint
  */
 export const upgradeCustomerKYC = async (
 	customerId,
@@ -344,18 +343,17 @@ export const updateCustomer = async (customerId, updateData) => {
 };
 
 // ==================== DEPOSIT ACCOUNTS (WALLET LEDGER) ====================
+
+/**
+ * Create a deposit account (main wallet) for a customer
+ * ✅ FIXED: Using correct endpoint /api/v1/accounts
+ */
 export const createDepositAccount = async (
 	customerId,
 	productName = "SAVINGS",
 	metadata = {},
 ) => {
 	try {
-		console.log(
-			`🔵 createDepositAccount called with customerId: ${customerId}`,
-		);
-		console.log(`   productName: ${productName}`);
-		console.log(`   metadata:`, metadata);
-
 		const payload = {
 			data: {
 				type: "DepositAccount",
@@ -379,25 +377,17 @@ export const createDepositAccount = async (
 		};
 
 		console.log(
-			"📝 Creating deposit account payload:",
+			"📝 Creating deposit account (wallet):",
 			JSON.stringify(payload, null, 2),
 		);
 
-		const response = await makeAnchorRequest(
-			"post",
-			"/deposit-accounts",
-			payload,
-		);
-
-		console.log("📥 createDepositAccount response status:", response.status);
-		console.log(
-			"📥 createDepositAccount response data:",
-			JSON.stringify(response.data, null, 2),
-		);
+		// ✅ CORRECT ENDPOINT: /accounts (not /deposit-accounts)
+		const response = await makeAnchorRequest("post", "/accounts", payload);
 
 		if (response.data?.data) {
 			const account = response.data.data;
 			console.log(`✅ Deposit account created: ${account.id}`);
+
 			return {
 				success: true,
 				accountId: account.id,
@@ -409,53 +399,29 @@ export const createDepositAccount = async (
 		return {
 			success: false,
 			error: "Invalid response from Anchor",
-			details: response.data,
 		};
 	} catch (error) {
-		console.error("❌ createDepositAccount error:");
-
+		console.error("❌ Create deposit account error:");
 		if (error.response) {
-			console.error(`   Status: ${error.response.status}`);
-			console.error(`   Data:`, JSON.stringify(error.response.data, null, 2));
-			return {
-				success: false,
-				error:
-					error.response.data?.message ||
-					error.response.data?.error ||
-					"Anchor API error",
-				statusCode: error.response.status,
-				details: error.response.data,
-			};
+			console.error("Status:", error.response.status);
+			console.error("Data:", JSON.stringify(error.response.data, null, 2));
 		}
-
-		if (error.request) {
-			console.error("   No response received from Anchor");
-			return {
-				success: false,
-				error: "No response from Anchor API",
-				statusCode: 503,
-			};
-		}
-
-		console.error(`   Error: ${error.message}`);
-		return {
-			success: false,
-			error: error.message,
-			statusCode: 500,
-		};
+		return handleAnchorError(error);
 	}
 };
 
 /**
  * Get all deposit accounts for a customer
+ * ✅ FIXED: Using correct endpoint
  */
 export const getDepositAccounts = async (customerId) => {
 	try {
 		console.log(`🔍 Fetching deposit accounts for customer: ${customerId}`);
 
+		// ✅ CORRECT ENDPOINT: /accounts?customerId={customerId}
 		const response = await makeAnchorRequest(
 			"get",
-			`/deposit-accounts?customerId=${customerId}`,
+			`/accounts?customerId=${customerId}`,
 		);
 
 		console.log("📥 Get deposit accounts response:", response.data);
@@ -494,14 +460,16 @@ export const getDepositAccounts = async (customerId) => {
 
 /**
  * Get a single deposit account by ID
+ * ✅ FIXED: Using correct endpoint
  */
 export const getDepositAccount = async (accountId) => {
 	try {
 		console.log(`🔍 Fetching deposit account: ${accountId}`);
 
+		// ✅ CORRECT ENDPOINT: /accounts/{accountId}?include=AccountNumber
 		const response = await makeAnchorRequest(
 			"get",
-			`/deposit-accounts/${accountId}`,
+			`/accounts/${accountId}?include=AccountNumber`,
 		);
 
 		console.log("📥 Get deposit account response:", response.data);
@@ -509,6 +477,19 @@ export const getDepositAccount = async (accountId) => {
 		if (response.data?.data) {
 			const account = response.data.data;
 			const attributes = account.attributes || {};
+			const included = response.data.included || [];
+
+			// Find account number in included
+			let accountNumber = null;
+			let bankName = "Anchor Bank";
+			for (const item of included) {
+				if (item.type === "AccountNumber") {
+					const itemAttributes = item.attributes || {};
+					accountNumber = itemAttributes.accountNumber || itemAttributes.number;
+					bankName = itemAttributes.bankName || "Anchor Bank";
+					break;
+				}
+			}
 
 			return {
 				success: true,
@@ -519,8 +500,8 @@ export const getDepositAccount = async (accountId) => {
 					status: attributes.status,
 					balance: attributes.balance || 0,
 					currency: attributes.currency || "NGN",
-					accountNumber: attributes.accountNumber || attributes.nuban,
-					bankName: attributes.bankName || "Anchor Bank",
+					accountNumber: accountNumber || attributes.accountNumber,
+					bankName: bankName || attributes.bankName || "Anchor Bank",
 					createdAt: attributes.createdAt,
 					updatedAt: attributes.updatedAt,
 				},
@@ -539,40 +520,25 @@ export const getDepositAccount = async (accountId) => {
 
 /**
  * Get deposit account balance
- * ✅ FIXED: Use the correct wallet balance endpoint
+ * ✅ FIXED: Using correct endpoint /api/v1/accounts/balance/{accountId}
  */
 export const getDepositAccountBalance = async (depositAccountId) => {
 	try {
-		// ✅ CORRECT ENDPOINT: /wallet-balances instead of /deposit-accounts/:id/balance
+		// ✅ CORRECT ENDPOINT: /accounts/balance/{accountId}
 		const response = await makeAnchorRequest(
 			"get",
-			`/wallet-balances?walletId=${depositAccountId}`,
+			`/accounts/balance/${depositAccountId}`,
 		);
 
-		if (response.data?.data && response.data.data.length > 0) {
-			const balanceData = response.data.data[0];
-			const attributes = balanceData.attributes || {};
+		if (response.data?.data) {
 			return {
 				success: true,
-				balance: attributes.balance || 0,
-				currency: attributes.currency || "NGN",
-				availableBalance:
-					attributes.availableBalance || attributes.balance || 0,
+				balance: response.data.data.availableBalance || 0,
+				ledgerBalance: response.data.data.ledgerBalance || 0,
+				hold: response.data.data.hold || 0,
+				pending: response.data.data.pending || 0,
+				currency: "NGN",
 			};
-		}
-
-		// Fallback: Try getting balance from deposit account
-		try {
-			const accountResponse = await getDepositAccount(depositAccountId);
-			if (accountResponse.success && accountResponse.account) {
-				return {
-					success: true,
-					balance: accountResponse.account.balance || 0,
-					currency: accountResponse.account.currency || "NGN",
-				};
-			}
-		} catch (fallbackError) {
-			console.log("⚠️ Fallback balance fetch failed:", fallbackError.message);
 		}
 
 		return {
@@ -581,6 +547,46 @@ export const getDepositAccountBalance = async (depositAccountId) => {
 		};
 	} catch (error) {
 		console.error("❌ Get deposit account balance error:", error);
+		return handleAnchorError(error);
+	}
+};
+
+/**
+ * Get account number for a deposit account
+ * ✅ NEW METHOD: /api/v1/account-numbers?AccountId={depositAccountId}
+ */
+export const getAccountNumberForDeposit = async (depositAccountId) => {
+	try {
+		console.log(
+			`🔍 Fetching account number for deposit account: ${depositAccountId}`,
+		);
+
+		// ✅ CORRECT ENDPOINT: /account-numbers?AccountId={depositAccountId}
+		const response = await makeAnchorRequest(
+			"get",
+			`/account-numbers?AccountId=${depositAccountId}`,
+		);
+
+		console.log("📥 Get account number response:", response.data);
+
+		if (response.data?.data && response.data.data.length > 0) {
+			const accountNumberData = response.data.data[0];
+			const attributes = accountNumberData.attributes || {};
+			return {
+				success: true,
+				accountNumber: attributes.accountNumber || attributes.number,
+				bankName: attributes.bankName || "Anchor Bank",
+				accountName: attributes.accountName,
+				bankCode: attributes.bankCode || "000",
+			};
+		}
+
+		return {
+			success: false,
+			error: "No account number found",
+		};
+	} catch (error) {
+		console.error("❌ Get account number error:", error);
 		return handleAnchorError(error);
 	}
 };
@@ -598,7 +604,7 @@ export const getAccountTransactions = async (
 
 		const response = await makeAnchorRequest(
 			"get",
-			`/deposit-accounts/${accountId}/transactions?limit=${limit}&offset=${offset}`,
+			`/accounts/${accountId}/transactions?limit=${limit}&offset=${offset}`,
 		);
 
 		console.log("📥 Get account transactions response:", response.data);
@@ -644,181 +650,30 @@ export const getAccountTransactions = async (
 	}
 };
 
-// ==================== VIRTUAL NUBAN (VIRTUAL ACCOUNTS) ====================
-
-export const createVirtualNuban = async (depositAccountId, metadata = {}) => {
-	try {
-		const payload = {
-			data: {
-				type: "VirtualNuban",
-				attributes: {
-					metadata: {
-						...metadata,
-						created_at: new Date().toISOString(),
-					},
-				},
-				relationships: {
-					// ✅ The deposit account this virtual NUBAN belongs to
-					depositAccount: {
-						data: {
-							id: depositAccountId,
-							type: "DepositAccount",
-						},
-					},
-					// ✅ CRITICAL: The settlement account where funds will be sent
-					settlementAccount: {
-						data: {
-							id: depositAccountId,
-							type: "DepositAccount",
-						},
-					},
-				},
-			},
-		};
-
-		console.log("📝 Creating virtual NUBAN:", JSON.stringify(payload, null, 2));
-
-		const response = await makeAnchorRequest(
-			"post",
-			"/virtual-nubans",
-			payload,
-		);
-
-		if (response.data?.data) {
-			const nuban = response.data.data;
-			const attributes = nuban.attributes || {};
-
-			console.log(`✅ Virtual NUBAN created: ${attributes.accountNumber}`);
-
-			return {
-				success: true,
-				virtualNubanId: nuban.id,
-				accountNumber: attributes.accountNumber,
-				bankName: attributes.bankName,
-				accountName: attributes.accountName,
-				bankCode: attributes.bankCode,
-			};
-		}
-
-		return {
-			success: false,
-			error: "Invalid response from Anchor",
-		};
-	} catch (error) {
-		console.error("❌ Create virtual NUBAN error:");
-		if (error.response) {
-			console.error("Status:", error.response.status);
-			console.error("Data:", JSON.stringify(error.response.data, null, 2));
-		}
-		return handleAnchorError(error);
-	}
-};
+// ==================== WALLET BALANCES ====================
 
 /**
- * Get virtual NUBANs for a deposit account
- */
-export const getVirtualNubans = async (depositAccountId) => {
-	try {
-		const response = await makeAnchorRequest(
-			"get",
-			`/virtual-nubans?depositAccountId=${depositAccountId}`,
-		);
-
-		if (response.data?.data) {
-			const nubans = response.data.data.map((nuban) => {
-				const attributes = nuban.attributes || {};
-				return {
-					id: nuban.id,
-					accountNumber: attributes.accountNumber,
-					bankName: attributes.bankName,
-					accountName: attributes.accountName,
-					bankCode: attributes.bankCode,
-				};
-			});
-
-			return {
-				success: true,
-				nubans,
-			};
-		}
-
-		return {
-			success: false,
-			error: "Failed to fetch virtual NUBANs",
-		};
-	} catch (error) {
-		return handleAnchorError(error);
-	}
-};
-
-/**
- * Get account number from deposit account
- */
-export const getAccountNumber = async (depositAccountId) => {
-	try {
-		console.log(`🔍 Getting account number for: ${depositAccountId}`);
-
-		// First try to get virtual NUBANs
-		const nubanResult = await getVirtualNubans(depositAccountId);
-
-		if (nubanResult.success && nubanResult.nubans.length > 0) {
-			const nuban = nubanResult.nubans[0];
-			return {
-				success: true,
-				accountNumber: nuban.accountNumber,
-				bankName: nuban.bankName,
-				accountName: nuban.accountName,
-				bankCode: nuban.bankCode,
-			};
-		}
-
-		// If no virtual NUBAN, try to get from deposit account
-		const accountResult = await getDepositAccount(depositAccountId);
-
-		if (accountResult.success) {
-			return {
-				success: true,
-				accountNumber: accountResult.account.accountNumber || "pending",
-				bankName: accountResult.account.bankName || "Anchor Bank",
-				accountName: accountResult.account.accountName || "Kuditrak User",
-				bankCode: "000",
-			};
-		}
-
-		return {
-			success: false,
-			error: "Could not get account number",
-		};
-	} catch (error) {
-		console.error("❌ Get account number error:", error);
-		return handleAnchorError(error);
-	}
-};
-
-// ==================== WALLET BALANCES (NEW ENDPOINT) ====================
-
-/**
- * Get wallet balance using the correct endpoint
- * ✅ NEW METHOD - Uses /wallet-balances endpoint
+ * Get wallet balance
+ * ✅ Uses /accounts/balance/{walletId}
  */
 export const getWalletBalance = async (walletId) => {
 	try {
 		console.log(`🔍 Fetching wallet balance for: ${walletId}`);
 
+		// ✅ CORRECT ENDPOINT: /accounts/balance/{walletId}
 		const response = await makeAnchorRequest(
 			"get",
-			`/wallet-balances?walletId=${walletId}`,
+			`/accounts/balance/${walletId}`,
 		);
 
-		if (response.data?.data && response.data.data.length > 0) {
-			const balanceData = response.data.data[0];
-			const attributes = balanceData.attributes || {};
+		if (response.data?.data) {
 			return {
 				success: true,
-				balance: attributes.balance || 0,
-				currency: attributes.currency || "NGN",
-				availableBalance:
-					attributes.availableBalance || attributes.balance || 0,
+				balance: response.data.data.availableBalance || 0,
+				ledgerBalance: response.data.data.ledgerBalance || 0,
+				hold: response.data.data.hold || 0,
+				pending: response.data.data.pending || 0,
+				currency: "NGN",
 			};
 		}
 
@@ -872,12 +727,8 @@ export default {
 	getDepositAccounts,
 	getDepositAccountBalance,
 	getAccountTransactions,
-	getAccountNumber,
-	getWalletBalance, // ✅ New method
-
-	// Virtual NUBAN (Top-up accounts)
-	createVirtualNuban,
-	getVirtualNubans,
+	getAccountNumberForDeposit, // ✅ New method
+	getWalletBalance,
 
 	// Webhook
 	verifyWebhookSignature,

@@ -909,6 +909,8 @@ export const updateKYC = async (req, res) => {
  * Helper function to create virtual account for user
  * ✅ REAL ANCHOR ONLY - No mock fallback
  */
+// backend/controllers/userController.js - Updated createVirtualAccountForUser
+
 export const createVirtualAccountForUser = async (userId) => {
 	try {
 		console.log("🏦 Creating virtual account for user:", userId);
@@ -960,7 +962,6 @@ export const createVirtualAccountForUser = async (userId) => {
 		if (anchorCustomer.kycLevel === "TIER_0") {
 			console.log("⚠️ KYC not completed in Anchor. Attempting to upgrade...");
 
-			// Check if we have the required KYC data
 			const bvn = user.kyc?.bvn;
 			const dateOfBirth = user.kyc?.dateOfBirth;
 			const gender = user.kyc?.gender;
@@ -978,7 +979,6 @@ export const createVirtualAccountForUser = async (userId) => {
 				};
 			}
 
-			// Format date for Anchor
 			const formattedDate =
 				dateOfBirth instanceof Date
 					? dateOfBirth.toISOString().split("T")[0]
@@ -988,7 +988,6 @@ export const createVirtualAccountForUser = async (userId) => {
 				`📤 Upgrading KYC in Anchor: BVN=${bvn}, DOB=${formattedDate}, Gender=${gender}`,
 			);
 
-			// Upgrade KYC in Anchor
 			const upgradeResult = await anchorService.upgradeCustomerKYC(
 				anchorCustomer.anchorCustomerId,
 				bvn,
@@ -1008,20 +1007,17 @@ export const createVirtualAccountForUser = async (userId) => {
 			console.log(`✅ KYC upgrade initiated: ${upgradeResult.verificationId}`);
 			console.log(`   Status: ${upgradeResult.status}`);
 
-			// Update local customer record
 			anchorCustomer.kycLevel = "TIER_1";
 			anchorCustomer.kycStatus = "pending";
 			anchorCustomer.currentVerificationId = upgradeResult.verificationId;
 			anchorCustomer.identificationLevel2 = { bvn, dateOfBirth, gender };
 			await anchorCustomer.save();
 
-			// Update user record
 			user.anchorKycLevel = "TIER_1";
 			user.kyc.anchorVerificationId = upgradeResult.verificationId;
 			user.kyc.paystackValidationPending = true;
 			await user.save();
 
-			// Return waiting status - KYC needs to be approved first
 			return {
 				success: false,
 				error:
@@ -1032,13 +1028,14 @@ export const createVirtualAccountForUser = async (userId) => {
 			};
 		}
 
-		// ✅ KYC is already TIER_1 or higher, proceed with virtual account creation
 		console.log(
 			`✅ KYC Level ${anchorCustomer.kycLevel} - Proceeding with virtual account creation`,
 		);
 
 		// ✅ STEP 1: Check if account already exists in Anchor
 		let depositAccountId = null;
+		let existingAccountNumber = null;
+
 		try {
 			console.log("🔍 Checking for existing deposit accounts in Anchor...");
 			const accountsResponse = await anchorService.getDepositAccounts(
@@ -1049,6 +1046,23 @@ export const createVirtualAccountForUser = async (userId) => {
 				const existingAcc = accountsResponse.accounts[0];
 				depositAccountId = existingAcc.id || existingAcc.accountId;
 				console.log(`✅ Found existing deposit account: ${depositAccountId}`);
+
+				// Try to get account number for existing account
+				try {
+					const accountNumberResponse =
+						await anchorService.getAccountNumberForDeposit(depositAccountId);
+					if (accountNumberResponse.success) {
+						existingAccountNumber = accountNumberResponse.accountNumber;
+						console.log(
+							`✅ Found existing account number: ${existingAccountNumber}`,
+						);
+					}
+				} catch (err) {
+					console.log(
+						"⚠️ Could not get account number for existing account:",
+						err.message,
+					);
+				}
 			}
 		} catch (err) {
 			console.log("⚠️ Could not check existing accounts:", err.message);
@@ -1086,38 +1100,67 @@ export const createVirtualAccountForUser = async (userId) => {
 			console.log(`✅ Deposit account created: ${depositAccountId}`);
 		}
 
-		// ✅ STEP 3: Create virtual NUBAN for the account
-		console.log("📝 Creating virtual NUBAN...");
+		// ✅ STEP 3: Get account number using the correct endpoint
+		let accountNumber = existingAccountNumber;
+		let bankName = "Anchor Bank";
+		let accountName = user.fullName;
 
-		const nubanResponse = await anchorService.createVirtualNuban(
-			depositAccountId,
-			{
-				userId: userId.toString(),
-				platform: "kuditrak",
-				currency: "NGN",
-			},
-		);
+		if (!accountNumber) {
+			console.log(
+				"📝 Getting account number for deposit account:",
+				depositAccountId,
+			);
 
-		if (!nubanResponse.success) {
-			console.error("❌ Failed to create virtual NUBAN:", nubanResponse.error);
-			return {
-				success: false,
-				error:
-					nubanResponse.error || "Failed to create virtual NUBAN in Anchor",
-			};
+			const accountNumberResponse =
+				await anchorService.getAccountNumberForDeposit(depositAccountId);
+
+			if (!accountNumberResponse.success) {
+				console.error(
+					"❌ Failed to get account number:",
+					accountNumberResponse.error,
+				);
+
+				// Try the alternative method: get account details with include
+				try {
+					console.log("📝 Trying alternative method to get account number...");
+					const accountDetails =
+						await anchorService.getDepositAccount(depositAccountId);
+					if (accountDetails.success && accountDetails.account) {
+						accountNumber = accountDetails.account.accountNumber;
+						bankName = accountDetails.account.bankName || "Anchor Bank";
+						console.log(
+							`✅ Account number retrieved via include: ${accountNumber}`,
+						);
+					}
+				} catch (err) {
+					console.log("⚠️ Alternative method also failed:", err.message);
+				}
+
+				if (!accountNumber) {
+					return {
+						success: false,
+						error:
+							accountNumberResponse.error ||
+							"Failed to get account number from Anchor",
+					};
+				}
+			} else {
+				accountNumber = accountNumberResponse.accountNumber;
+				bankName = accountNumberResponse.bankName || "Anchor Bank";
+				accountName = accountNumberResponse.accountName || user.fullName;
+				console.log(`✅ Account number retrieved: ${accountNumber}`);
+			}
 		}
-
-		console.log(`✅ Virtual NUBAN created: ${nubanResponse.accountNumber}`);
 
 		// ✅ STEP 4: Save to database
 		const virtualAccount = await AnchorVirtualAccount.create({
 			userId,
 			anchorCustomerId: anchorCustomer.anchorCustomerId,
 			walletId: null,
-			accountNumber: nubanResponse.accountNumber,
-			bankName: nubanResponse.bankName || "Anchor Bank",
-			bankCode: nubanResponse.bankCode || "000",
-			accountName: user.fullName,
+			accountNumber: accountNumber,
+			bankName: bankName,
+			bankCode: "000",
+			accountName: accountName,
 			anchorReference: depositAccountId,
 			isActive: true,
 			isMock: false,
@@ -1127,17 +1170,34 @@ export const createVirtualAccountForUser = async (userId) => {
 
 		console.log(`✅ Virtual account saved: ${virtualAccount.accountNumber}`);
 
-		// ✅ STEP 5: Update wallet with account number if exists
-		const wallet = await AnchorWallet.findOne({
+		// ✅ STEP 5: Create or update wallet with REAL Anchor data
+		let wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
 		});
 
-		if (wallet) {
+		if (!wallet) {
+			wallet = await AnchorWallet.create({
+				userId,
+				anchorCustomerId: anchorCustomer.anchorCustomerId,
+				walletId: depositAccountId, // ✅ Use the REAL Anchor deposit account ID
+				walletType: "main",
+				balance: 0,
+				name: "Main Wallet",
+				currency: "NGN",
+				status: "active",
+				accountNumber: virtualAccount.accountNumber,
+				bankName: virtualAccount.bankName,
+				isLocal: false,
+			});
+			console.log(`✅ Wallet created with Anchor ID: ${wallet.walletId}`);
+		} else {
+			wallet.walletId = depositAccountId;
 			wallet.accountNumber = virtualAccount.accountNumber;
 			wallet.bankName = virtualAccount.bankName;
+			wallet.isLocal = false;
 			await wallet.save();
-			console.log("✅ Wallet updated with account number");
+			console.log("✅ Wallet updated with Anchor data");
 		}
 
 		// ✅ STEP 6: Send notification
