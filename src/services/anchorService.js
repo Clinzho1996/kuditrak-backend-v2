@@ -216,6 +216,11 @@ export const createAnchorCustomerWithKYC = async (userData) => {
  * Upgrade customer KYC from Tier 0 to Tier 1
  * ✅ FIXED: Using correct endpoint and payload structure from Anchor docs
  */
+// backend/services/anchorService.js - Add sandbox mode bypass
+
+/**
+ * Upgrade customer KYC - with sandbox bypass
+ */
 export const upgradeCustomerKYC = async (
 	customerId,
 	bvn,
@@ -223,17 +228,34 @@ export const upgradeCustomerKYC = async (
 	gender,
 ) => {
 	try {
-		// ✅ According to Anchor docs, use the verification endpoint
-		// with level: "TIER_2" (this is correct - Tier 1 is the result, not the request level)
+		// ✅ Check if we're in sandbox mode
+		const isSandbox =
+			process.env.NODE_ENV !== "production" ||
+			process.env.ANCHOR_BASE_URL?.includes("sandbox");
+
+		if (isSandbox) {
+			console.log("⚠️ Running in SANDBOX mode - simulating KYC approval");
+
+			// Simulate KYC approval for sandbox
+			return {
+				success: true,
+				verificationId: `sandbox_ver_${Date.now()}`,
+				status: "approved",
+				isSandbox: true,
+				message: "KYC approved in sandbox mode",
+			};
+		}
+
+		// For production, use the real API
 		const payload = {
 			data: {
 				type: "Verification",
 				attributes: {
-					level: "TIER_2", // ✅ Always use TIER_2 for BVN verification
+					level: "TIER_2",
 					level2: {
 						bvn: bvn,
 						dateOfBirth: dateOfBirth,
-						gender: gender, // Should be "Male" or "Female" with capital letter
+						gender: gender,
 					},
 				},
 			},
@@ -241,7 +263,6 @@ export const upgradeCustomerKYC = async (
 
 		console.log("📝 Upgrade KYC Payload:", JSON.stringify(payload, null, 2));
 
-		// ✅ Use the verification endpoint
 		const response = await makeAnchorRequest(
 			"post",
 			`/customers/${customerId}/verification/individual`,
@@ -267,6 +288,23 @@ export const upgradeCustomerKYC = async (
 		};
 	} catch (error) {
 		console.error("❌ Upgrade KYC error details:");
+
+		// ✅ Handle insufficient balance specifically
+		if (
+			error.response?.data?.errors?.[0]?.detail?.includes(
+				"Insufficient balance",
+			)
+		) {
+			console.log("⚠️ Insufficient balance for KYC verification");
+			return {
+				success: false,
+				error:
+					"Insufficient balance to perform KYC verification. Please contact support.",
+				errorType: "INSUFFICIENT_BALANCE",
+				requiresFunding: true,
+			};
+		}
+
 		if (error.response) {
 			console.error("Status:", error.response.status);
 			console.error("Data:", JSON.stringify(error.response.data, null, 2));
