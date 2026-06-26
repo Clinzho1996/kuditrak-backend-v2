@@ -142,16 +142,12 @@ const getMainWallet = async (userId) => {
 		throw error;
 	}
 };
-
-// backend/controllers/userGoalController.js - UPDATED createGoalDepositAccount
+// backend/controllers/userGoalController.js - Replace createGoalDepositAccount
 
 const createGoalDepositAccount = async (userId, goal) => {
 	try {
 		console.log(`🏦 Creating deposit account for goal: ${goal.name}`);
 		console.log(`   Goal ID: ${goal._id}`);
-		console.log(
-			`   Current goalDepositAccountId: ${goal.goalDepositAccountId || "NULL"}`,
-		);
 
 		const user = await getUserWithAnchorData(userId);
 		if (!user) {
@@ -163,7 +159,7 @@ const createGoalDepositAccount = async (userId, goal) => {
 			throw new Error("Failed to get Anchor customer: " + anchorCustomer.error);
 		}
 
-		// ✅ Create account in Anchor
+		// Create account in Anchor
 		console.log("📝 Creating deposit account in Anchor...");
 
 		const accountResponse = await anchorService.createDepositAccount(
@@ -192,7 +188,7 @@ const createGoalDepositAccount = async (userId, goal) => {
 		const goalAccountId = accountResponse.accountId;
 		console.log(`✅ Goal deposit account created: ${goalAccountId}`);
 
-		// ✅ Get account number
+		// Get account number
 		console.log("🔍 Fetching account number...");
 
 		let accountNumber = null;
@@ -213,91 +209,107 @@ const createGoalDepositAccount = async (userId, goal) => {
 			console.warn("⚠️ Could not get account number:", err.message);
 		}
 
-		// ✅ CRITICAL: Update the goal with multiple methods to ensure save
-		console.log("💾 Saving goal with account details...");
+		// ✅ USE findByIdAndUpdate - THIS ALWAYS WORKS
+		console.log("💾 Updating goal via findByIdAndUpdate...");
 
-		// Method 1: Direct property assignment
-		goal.goalDepositAccountId = goalAccountId;
-		goal.goalAccountNumber = accountNumber;
-		goal.goalBankName = bankName;
-		goal.goalBankCode = bankCode;
-		goal.goalAccountStatus = "active";
-		goal.goalAccountBalance = 0;
-		goal.updatedAt = new Date();
-
-		// ✅ Method 2: Use set() method (Mongoose way)
-		goal.set({
-			goalDepositAccountId: goalAccountId,
-			goalAccountNumber: accountNumber,
-			goalBankName: bankName,
-			goalBankCode: bankCode,
-			goalAccountStatus: "active",
-			goalAccountBalance: 0,
-			updatedAt: new Date(),
-		});
-
-		// ✅ Method 3: Save with options to force validation
-		const savedGoal = await goal.save({
-			validateBeforeSave: true,
-			runValidators: true,
-		});
-
-		console.log(
-			`✅ Goal saved with account ID: ${savedGoal.goalDepositAccountId}`,
+		const updatedGoal = await UserGoal.findByIdAndUpdate(
+			goal._id,
+			{
+				$set: {
+					goalDepositAccountId: goalAccountId,
+					goalAccountNumber: accountNumber,
+					goalBankName: bankName,
+					goalBankCode: bankCode,
+					goalAccountStatus: "active",
+					goalAccountBalance: 0,
+					updatedAt: new Date(),
+				},
+			},
+			{
+				new: true,
+				runValidators: true,
+				returnDocument: "after",
+			},
 		);
-		console.log(`   Account Number: ${savedGoal.goalAccountNumber}`);
 
-		// ✅ Method 4: Verify save by re-fetching
-		const verifiedGoal = await UserGoal.findById(goal._id);
-		if (verifiedGoal) {
+		if (updatedGoal) {
+			console.log(`✅ Goal updated via findByIdAndUpdate:`);
 			console.log(
-				`✅ VERIFIED: Goal account ID is ${verifiedGoal.goalDepositAccountId || "STILL NULL!"}`,
+				`   goalDepositAccountId: ${updatedGoal.goalDepositAccountId}`,
 			);
+			console.log(`   goalAccountNumber: ${updatedGoal.goalAccountNumber}`);
+			console.log(`   goalBankName: ${updatedGoal.goalBankName}`);
 
-			if (!verifiedGoal.goalDepositAccountId) {
-				// ✅ If still null, try direct update
-				console.log("⚠️ Direct update fallback...");
-				await UserGoal.findByIdAndUpdate(
-					goal._id,
-					{
-						$set: {
-							goalDepositAccountId: goalAccountId,
-							goalAccountNumber: accountNumber,
-							goalBankName: bankName,
-							goalBankCode: bankCode,
-							goalAccountStatus: "active",
-							goalAccountBalance: 0,
-							updatedAt: new Date(),
-						},
-					},
-					{ new: true, runValidators: true },
+			// ✅ Update the original goal reference
+			goal.goalDepositAccountId = updatedGoal.goalDepositAccountId;
+			goal.goalAccountNumber = updatedGoal.goalAccountNumber;
+			goal.goalBankName = updatedGoal.goalBankName;
+			goal.goalBankCode = updatedGoal.goalBankCode;
+			goal.goalAccountStatus = updatedGoal.goalAccountStatus;
+
+			if (updatedGoal.goalDepositAccountId) {
+				console.log(
+					`✅ VERIFIED: Goal account ID is now ${updatedGoal.goalDepositAccountId}`,
 				);
-
-				// ✅ Verify again
-				const finalGoal = await UserGoal.findById(goal._id);
-				if (finalGoal && finalGoal.goalDepositAccountId) {
-					console.log(
-						`✅ FIXED: Goal account ID is now ${finalGoal.goalDepositAccountId}`,
-					);
-					// Update the original goal reference
-					goal.goalDepositAccountId = finalGoal.goalDepositAccountId;
-					goal.goalAccountNumber = finalGoal.goalAccountNumber;
-					goal.goalBankName = finalGoal.goalBankName;
-					goal.goalBankCode = finalGoal.goalBankCode;
-				} else {
-					console.error("❌ CRITICAL: Goal account ID still not saved!");
-				}
+				return {
+					success: true,
+					goalAccountId: updatedGoal.goalDepositAccountId,
+					accountNumber: updatedGoal.goalAccountNumber,
+					bankName: updatedGoal.goalBankName,
+					bankCode: updatedGoal.goalBankCode,
+					wasExisting: false,
+				};
 			}
 		}
 
-		return {
-			success: true,
-			goalAccountId: goalAccountId,
-			accountNumber: accountNumber,
-			bankName: bankName,
-			bankCode: bankCode,
-			wasExisting: false,
-		};
+		// ✅ Fallback: Direct MongoDB update
+		console.log("⚠️ Fallback: Direct MongoDB update...");
+
+		const db = mongoose.connection.db;
+		const collection = db.collection("usergoals");
+
+		const result = await collection.updateOne(
+			{ _id: goal._id },
+			{
+				$set: {
+					goalDepositAccountId: goalAccountId,
+					goalAccountNumber: accountNumber,
+					goalBankName: bankName,
+					goalBankCode: bankCode,
+					goalAccountStatus: "active",
+					goalAccountBalance: 0,
+					updatedAt: new Date(),
+				},
+			},
+		);
+
+		console.log(`Direct update result: ${result.modifiedCount} modified`);
+
+		if (result.modifiedCount > 0) {
+			// Re-fetch to verify
+			const finalGoal = await UserGoal.findById(goal._id);
+			if (finalGoal && finalGoal.goalDepositAccountId) {
+				console.log(
+					`✅ VERIFIED: Goal account ID is ${finalGoal.goalDepositAccountId}`,
+				);
+				goal.goalDepositAccountId = finalGoal.goalDepositAccountId;
+				goal.goalAccountNumber = finalGoal.goalAccountNumber;
+				goal.goalBankName = finalGoal.goalBankName;
+				goal.goalBankCode = finalGoal.goalBankCode;
+
+				return {
+					success: true,
+					goalAccountId: finalGoal.goalDepositAccountId,
+					accountNumber: finalGoal.goalAccountNumber,
+					bankName: finalGoal.goalBankName,
+					bankCode: finalGoal.goalBankCode,
+					wasExisting: false,
+				};
+			}
+		}
+
+		console.error("❌ CRITICAL: All save methods failed!");
+		throw new Error("Failed to save goal account ID to database");
 	} catch (error) {
 		console.error("❌ createGoalDepositAccount error:", error);
 		throw error;

@@ -1,4 +1,4 @@
-// backend/models/UserGoal.js - COMPLETE MODEL
+// backend/models/UserGoal.js
 
 import mongoose from "mongoose";
 
@@ -43,7 +43,7 @@ const userGoalSchema = new mongoose.Schema(
 			type: String,
 			default: "#4F46E5",
 		},
-		// ✅ Goal Deposit Account fields - make sure these exist
+		// ✅ NEW FIELDS - MUST BE DEFINED HERE
 		goalDepositAccountId: {
 			type: String,
 			default: null,
@@ -71,6 +71,10 @@ const userGoalSchema = new mongoose.Schema(
 		goalAccountBalance: {
 			type: Number,
 			default: 0,
+		},
+		subAccountId: {
+			type: String,
+			default: null,
 		},
 		allocationSchedule: {
 			frequency: {
@@ -105,35 +109,25 @@ const userGoalSchema = new mongoose.Schema(
 				default: null,
 			},
 		},
-		createdAt: {
-			type: Date,
-			default: Date.now,
-		},
-		updatedAt: {
-			type: Date,
-			default: Date.now,
-		},
 	},
 	{
-		// ✅ Add this to ensure the schema can handle new fields
-		strict: false,
-		// ✅ Add this to automatically update updatedAt
 		timestamps: true,
+		// ✅ Allow storing fields even if not in schema (for flexibility)
+		strict: false,
 	},
 );
 
-// ✅ Add a pre-save middleware to log changes
+// ✅ Add pre-save hook to log
 userGoalSchema.pre("save", function (next) {
-	console.log(`📝 Saving goal: ${this._id}`);
+	console.log(`📝 Pre-save hook for goal: ${this._id}`);
 	console.log(`   goalDepositAccountId: ${this.goalDepositAccountId}`);
 	console.log(`   goalAccountNumber: ${this.goalAccountNumber}`);
-	console.log(`   goalBankName: ${this.goalBankName}`);
 	next();
 });
 
-// ✅ Add a post-save middleware to verify save
+// ✅ Add post-save hook to verify
 userGoalSchema.post("save", function (doc) {
-	console.log(`✅ Goal saved successfully: ${doc._id}`);
+	console.log(`✅ Post-save hook: ${doc._id}`);
 	console.log(`   goalDepositAccountId: ${doc.goalDepositAccountId}`);
 });
 
