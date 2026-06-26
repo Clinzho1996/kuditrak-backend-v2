@@ -575,20 +575,24 @@ export const getBalance = async (req, res) => {
 			});
 		}
 
+		// Get virtual accounts
 		const virtualAccounts = await AnchorVirtualAccount.find({
 			userId,
 			isActive: true,
 		});
 
 		let balance = wallet.balance;
+		let accountNumber = wallet.accountNumber;
+		let bankName = wallet.bankName;
 
+		// If wallet is linked to Anchor, fetch real data
 		if (
 			!wallet.isLocal &&
 			wallet.walletId &&
 			!wallet.walletId.startsWith("local_")
 		) {
 			try {
-				// ✅ Use the new wallet balance endpoint
+				// Get real-time balance
 				const balanceResponse = await anchorService.getWalletBalance(
 					wallet.walletId,
 				);
@@ -598,21 +602,32 @@ export const getBalance = async (req, res) => {
 					await wallet.save();
 					console.log(`✅ Balance synced from Anchor: ${balance}`);
 				} else {
-					console.log(
-						"⚠️ Could not fetch real-time balance:",
-						balanceResponse.error,
+					console.log("⚠️ Could not fetch balance:", balanceResponse.error);
+				}
+
+				// Get account details if we have a virtual account
+				if (virtualAccounts.length > 0 && virtualAccounts[0].anchorReference) {
+					const accountDetails = await anchorService.getDepositAccount(
+						virtualAccounts[0].anchorReference,
 					);
-					balance = wallet.balance;
+					if (accountDetails.success && accountDetails.account) {
+						if (accountDetails.account.accountNumber) {
+							accountNumber = accountDetails.account.accountNumber;
+							virtualAccounts[0].accountNumber = accountNumber;
+							await virtualAccounts[0].save();
+						}
+						if (accountDetails.account.bankName) {
+							bankName = accountDetails.account.bankName;
+							virtualAccounts[0].bankName = bankName;
+							await virtualAccounts[0].save();
+						}
+					}
 				}
 			} catch (err) {
-				console.log("⚠️ Could not fetch real-time balance:", err.message);
-				balance = wallet.balance;
+				console.log("⚠️ Could not fetch real-time data:", err.message);
 			}
 		} else {
-			console.log(
-				"📊 Using local wallet balance (not synced with Anchor):",
-				wallet.balance,
-			);
+			console.log("📊 Using local wallet data (not synced with Anchor)");
 		}
 
 		const responseData = {
@@ -622,11 +637,16 @@ export const getBalance = async (req, res) => {
 			currency: "NGN",
 			walletId: wallet.walletId,
 			walletName: wallet.name,
-			accountNumber:
-				virtualAccounts[0]?.accountNumber || wallet.accountNumber || null,
-			bankName: virtualAccounts[0]?.bankName || wallet.bankName || null,
+			accountNumber: virtualAccounts[0]?.accountNumber || accountNumber || null,
+			bankName: virtualAccounts[0]?.bankName || bankName || null,
 			anchorCustomerId: wallet.anchorCustomerId,
 			isLocal: wallet.isLocal || false,
+			virtualAccounts: virtualAccounts.map((acc) => ({
+				accountNumber: acc.accountNumber,
+				bankName: acc.bankName,
+				accountName: acc.accountName,
+				isActive: acc.isActive,
+			})),
 		};
 
 		res.status(200).json(responseData);

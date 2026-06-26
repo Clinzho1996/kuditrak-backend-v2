@@ -2,10 +2,14 @@
 
 import { v2 as cloudinary } from "cloudinary";
 import dotenv from "dotenv";
+import AnchorCustomer from "../models/AnchorCustomer.js";
+import AnchorVirtualAccount from "../models/AnchorVirtualAccount.js";
+import AnchorWallet from "../models/AnchorWallet.js";
 import BankConnection from "../models/BankConnection.js";
 import BridgecardCardholder from "../models/BridgecardCardholder.js";
 import User from "../models/User.js";
 import { generateFinancialInsights } from "../services/aiService.js";
+import anchorService from "../services/anchorService.js";
 import bridgecardService from "../services/bridgecardService.js";
 import dojahService from "../services/dojahService.js";
 import {
@@ -897,6 +901,12 @@ export const updateKYC = async (req, res) => {
 /**
  * Helper function to create virtual account for user
  */
+// backend/controllers/userController.js - Replace createVirtualAccountForUser
+
+/**
+ * Helper function to create virtual account for user
+ * ✅ REAL ANCHOR ONLY - No mock fallback
+ */
 export const createVirtualAccountForUser = async (userId) => {
 	try {
 		console.log("🏦 Creating virtual account for user:", userId);
@@ -923,13 +933,29 @@ export const createVirtualAccountForUser = async (userId) => {
 		const anchorCustomer = await AnchorCustomer.findOne({ userId });
 		if (!anchorCustomer) {
 			console.log("❌ No Anchor customer found for user:", userId);
-			return { success: false, error: "Anchor customer not found" };
+			// Try to create one
+			const { getOrCreateAnchorCustomer } =
+				await import("../services/anchorCustomerService.js");
+			const result = await getOrCreateAnchorCustomer(userId);
+			if (!result.success) {
+				return { success: false, error: "Could not create Anchor customer" };
+			}
+			// Re-fetch the customer
+			const refreshedCustomer = await AnchorCustomer.findOne({ userId });
+			if (!refreshedCustomer) {
+				return { success: false, error: "Anchor customer creation failed" };
+			}
+			anchorCustomer = refreshedCustomer;
 		}
 
-		// Check if KYC is completed
+		// Check KYC level - must be at least TIER_1
 		if (anchorCustomer.kycLevel === "TIER_0") {
 			console.log("⚠️ KYC not completed, skipping virtual account creation");
-			return { success: false, error: "KYC not completed" };
+			return {
+				success: false,
+				error: "KYC not completed",
+				requiresKYC: true,
+			};
 		}
 
 		// Get user details
@@ -938,7 +964,11 @@ export const createVirtualAccountForUser = async (userId) => {
 			return { success: false, error: "User not found" };
 		}
 
-		// Create virtual account
+		console.log("👤 User:", user.fullName, user.email);
+
+		// ✅ STEP 1: Create deposit account in Anchor
+		console.log("📝 Creating deposit account in Anchor...");
+
 		const accountResponse = await anchorService.createDepositAccount(
 			anchorCustomer.anchorCustomerId,
 			"SAVINGS",
@@ -952,38 +982,61 @@ export const createVirtualAccountForUser = async (userId) => {
 
 		if (!accountResponse.success) {
 			console.error(
-				"❌ Failed to create virtual account:",
+				"❌ Failed to create deposit account:",
 				accountResponse.error,
 			);
-			return { success: false, error: accountResponse.error };
+			return {
+				success: false,
+				error:
+					accountResponse.error || "Failed to create deposit account in Anchor",
+			};
 		}
 
-		// Get account number
-		const accountNumberResponse = await anchorService.getAccountNumber(
-			accountResponse.accountId,
+		const depositAccountId = accountResponse.accountId;
+		console.log(`✅ Deposit account created: ${depositAccountId}`);
+
+		// ✅ STEP 2: Create virtual NUBAN for the account
+		console.log("📝 Creating virtual NUBAN...");
+
+		const nubanResponse = await anchorService.createVirtualNuban(
+			depositAccountId,
+			{
+				userId: userId.toString(),
+				platform: "kuditrak",
+				currency: "NGN",
+			},
 		);
 
-		// Save to database
+		if (!nubanResponse.success) {
+			console.error("❌ Failed to create virtual NUBAN:", nubanResponse.error);
+			return {
+				success: false,
+				error:
+					nubanResponse.error || "Failed to create virtual NUBAN in Anchor",
+			};
+		}
+
+		console.log(`✅ Virtual NUBAN created: ${nubanResponse.accountNumber}`);
+
+		// ✅ STEP 3: Save to database
 		const virtualAccount = await AnchorVirtualAccount.create({
 			userId,
 			anchorCustomerId: anchorCustomer.anchorCustomerId,
 			walletId: null,
-			accountNumber: accountNumberResponse.success
-				? accountNumberResponse.accountNumber
-				: "pending",
-			bankName: accountNumberResponse.success
-				? accountNumberResponse.bankName
-				: "Anchor Bank",
-			bankCode: "000",
+			accountNumber: nubanResponse.accountNumber,
+			bankName: nubanResponse.bankName || "Anchor Bank",
+			bankCode: nubanResponse.bankCode || "000",
 			accountName: user.fullName,
-			anchorReference: accountResponse.accountId,
+			anchorReference: depositAccountId,
 			isActive: true,
 			isMock: false,
 			provider: "anchor",
 			currency: "NGN",
 		});
 
-		// Update wallet with account number
+		console.log(`✅ Virtual account saved: ${virtualAccount.accountNumber}`);
+
+		// ✅ STEP 4: Update wallet with account number if exists
 		const wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -993,25 +1046,32 @@ export const createVirtualAccountForUser = async (userId) => {
 			wallet.accountNumber = virtualAccount.accountNumber;
 			wallet.bankName = virtualAccount.bankName;
 			await wallet.save();
+			console.log("✅ Wallet updated with account number");
 		}
 
-		// Send notification
-		await sendPushToUser(
-			userId,
-			"🏦 Virtual Account Ready",
-			`Your virtual account ${virtualAccount.accountNumber} (${virtualAccount.bankName}) is ready to receive money.`,
-			{
-				type: "virtual_account_created",
-				accountNumber: virtualAccount.accountNumber,
-				bankName: virtualAccount.bankName,
-			},
-		);
+		// ✅ STEP 5: Send notification
+		try {
+			await sendPushToUser(
+				userId,
+				"🏦 Virtual Account Ready",
+				`Your virtual account ${virtualAccount.accountNumber} (${virtualAccount.bankName}) is ready to receive money.`,
+				{
+					type: "virtual_account_created",
+					accountNumber: virtualAccount.accountNumber,
+					bankName: virtualAccount.bankName,
+				},
+			);
+		} catch (pushError) {
+			console.log("⚠️ Push notification error:", pushError.message);
+		}
 
-		console.log("✅ Virtual account created:", virtualAccount.accountNumber);
+		console.log("✅ Virtual account setup complete!");
 
 		return {
 			success: true,
 			account: virtualAccount,
+			accountNumber: virtualAccount.accountNumber,
+			bankName: virtualAccount.bankName,
 		};
 	} catch (error) {
 		console.error("❌ Create virtual account error:", error);
@@ -1019,6 +1079,87 @@ export const createVirtualAccountForUser = async (userId) => {
 	}
 };
 
+// backend/controllers/userController.js - Add this function
+
+export const getVirtualAccountDetails = async (req, res) => {
+	try {
+		const userId = req.user._id;
+
+		// Check for virtual account
+		let virtualAccount = await AnchorVirtualAccount.findOne({
+			userId,
+			isActive: true,
+		});
+
+		if (!virtualAccount) {
+			// Try to create one
+			const result = await createVirtualAccountForUser(userId);
+			if (!result.success) {
+				return res.status(404).json({
+					success: false,
+					error: result.error || "No virtual account found",
+					requiresKYC: result.requiresKYC || false,
+				});
+			}
+			virtualAccount = result.account;
+		}
+
+		// Get fresh data from Anchor
+		let balance = 0;
+		let accountNumber = virtualAccount.accountNumber;
+		let bankName = virtualAccount.bankName;
+
+		if (virtualAccount.anchorReference) {
+			try {
+				// Get balance
+				const balanceResponse = await anchorService.getWalletBalance(
+					virtualAccount.anchorReference,
+				);
+				if (balanceResponse.success) {
+					balance = balanceResponse.balance;
+				}
+
+				// Get account details
+				const accountDetails = await anchorService.getDepositAccount(
+					virtualAccount.anchorReference,
+				);
+				if (accountDetails.success && accountDetails.account) {
+					if (accountDetails.account.accountNumber) {
+						accountNumber = accountDetails.account.accountNumber;
+						virtualAccount.accountNumber = accountNumber;
+						await virtualAccount.save();
+					}
+					if (accountDetails.account.bankName) {
+						bankName = accountDetails.account.bankName;
+						virtualAccount.bankName = bankName;
+						await virtualAccount.save();
+					}
+				}
+			} catch (err) {
+				console.log("⚠️ Could not fetch fresh account details:", err.message);
+			}
+		}
+
+		res.status(200).json({
+			success: true,
+			account: {
+				id: virtualAccount._id,
+				accountNumber: accountNumber,
+				bankName: bankName,
+				accountName: virtualAccount.accountName,
+				balance: balance,
+				isActive: virtualAccount.isActive,
+				currency: virtualAccount.currency || "NGN",
+			},
+		});
+	} catch (error) {
+		console.error("❌ Get virtual account details error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+};
 /**
  * Register user with Bridgecard after KYC verification
  */

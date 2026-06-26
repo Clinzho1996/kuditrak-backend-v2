@@ -1,4 +1,4 @@
-// backend/routes/userRoutes.js - Add Dojah routes
+// backend/routes/userRoutes.js - Fixed with all imports
 
 import express from "express";
 import {
@@ -9,6 +9,7 @@ import {
 	getInsights,
 	getKYCStatus,
 	getProfile,
+	getVirtualAccountDetails,
 	registerDeviceToken,
 	searchKuditrakUsers,
 	testPushNotification,
@@ -29,7 +30,7 @@ import upload from "../middleware/upload.js";
 
 const router = express.Router();
 
-// Profile Routes
+// ==================== PROFILE ROUTES ====================
 router.get("/profile", protect, getProfile);
 router.put("/profile", protect, updateProfile);
 router.put(
@@ -40,10 +41,10 @@ router.put(
 );
 router.get("/insights", protect, getInsights);
 
-// Search
+// ==================== SEARCH ====================
 router.get("/search", protect, searchKuditrakUsers);
 
-// KYC Routes
+// ==================== KYC ROUTES ====================
 router.get("/kyc/status", protect, getKYCStatus);
 router.post("/kyc", protect, updateKYC);
 router.post("/upload-id-image", protect, upload.single("image"), uploadIDImage);
@@ -57,13 +58,53 @@ router.post("/kyc/verify-address", protect, verifyAddress);
 router.post("/kyc/verify-liveness", protect, verifyLiveness);
 router.post("/kyc/complete", protect, completeKYC);
 
-// Push Notification Routes
+// ==================== VIRTUAL ACCOUNT ROUTES ====================
+// Create virtual account (Anchor deposit account + virtual NUBAN)
+router.post("/virtual-account/create", protect, async (req, res, next) => {
+	try {
+		const userId = req.user._id;
+		console.log("🔵 Creating virtual account for user:", userId);
+
+		const result = await createVirtualAccountForUser(userId);
+
+		if (!result.success) {
+			return res.status(400).json({
+				success: false,
+				error: result.error,
+				requiresKYC: result.requiresKYC || false,
+			});
+		}
+
+		res.status(200).json({
+			success: true,
+			message: "Virtual account created successfully",
+			account: {
+				id: result.account._id,
+				accountNumber: result.account.accountNumber,
+				bankName: result.account.bankName,
+				accountName: result.account.accountName,
+				isActive: result.account.isActive,
+			},
+		});
+	} catch (error) {
+		console.error("❌ Create virtual account error:", error);
+		res.status(500).json({
+			success: false,
+			error: error.message,
+		});
+	}
+});
+
+// Get virtual account details with real-time balance
+router.get("/virtual-account", protect, getVirtualAccountDetails);
+
+// ==================== PUSH NOTIFICATION ROUTES ====================
 router.post("/device-token", protect, registerDeviceToken);
 router.delete("/device-token", protect, unregisterDeviceToken);
 router.get("/device-tokens", protect, getDeviceTokens);
 router.post("/test-push", protect, testPushNotification);
 
-// Account Management
+// ==================== ACCOUNT MANAGEMENT ====================
 router.get("/check-limit", protect, checkConnectionLimit);
 router.delete("/delete-account", protect, deleteAccount);
 
