@@ -143,7 +143,7 @@ const getMainWallet = async (userId) => {
 		throw error;
 	}
 };
-// backend/controllers/userGoalController.js - Replace createGoalDepositAccount
+// backend/controllers/userGoalController.js - FIXED createGoalDepositAccount
 
 const createGoalDepositAccount = async (userId, goal) => {
 	try {
@@ -210,66 +210,13 @@ const createGoalDepositAccount = async (userId, goal) => {
 			console.warn("⚠️ Could not get account number:", err.message);
 		}
 
-		// ✅ USE findByIdAndUpdate - THIS ALWAYS WORKS
-		console.log("💾 Updating goal via findByIdAndUpdate...");
-
-		const updatedGoal = await UserGoal.findByIdAndUpdate(
-			goal._id,
-			{
-				$set: {
-					goalDepositAccountId: goalAccountId,
-					goalAccountNumber: accountNumber,
-					goalBankName: bankName,
-					goalBankCode: bankCode,
-					goalAccountStatus: "active",
-					goalAccountBalance: 0,
-					updatedAt: new Date(),
-				},
-			},
-			{
-				new: true,
-				runValidators: true,
-				returnDocument: "after",
-			},
-		);
-
-		if (updatedGoal) {
-			console.log(`✅ Goal updated via findByIdAndUpdate:`);
-			console.log(
-				`   goalDepositAccountId: ${updatedGoal.goalDepositAccountId}`,
-			);
-			console.log(`   goalAccountNumber: ${updatedGoal.goalAccountNumber}`);
-			console.log(`   goalBankName: ${updatedGoal.goalBankName}`);
-
-			// ✅ Update the original goal reference
-			goal.goalDepositAccountId = updatedGoal.goalDepositAccountId;
-			goal.goalAccountNumber = updatedGoal.goalAccountNumber;
-			goal.goalBankName = updatedGoal.goalBankName;
-			goal.goalBankCode = updatedGoal.goalBankCode;
-			goal.goalAccountStatus = updatedGoal.goalAccountStatus;
-
-			if (updatedGoal.goalDepositAccountId) {
-				console.log(
-					`✅ VERIFIED: Goal account ID is now ${updatedGoal.goalDepositAccountId}`,
-				);
-				return {
-					success: true,
-					goalAccountId: updatedGoal.goalDepositAccountId,
-					accountNumber: updatedGoal.goalAccountNumber,
-					bankName: updatedGoal.goalBankName,
-					bankCode: updatedGoal.goalBankCode,
-					wasExisting: false,
-				};
-			}
-		}
-
-		// ✅ Fallback: Direct MongoDB update
-		console.log("⚠️ Fallback: Direct MongoDB update...");
+		// ✅ DIRECT MONGODB UPDATE - THIS WORKS!
+		console.log("💾 Updating goal directly in MongoDB...");
 
 		const db = mongoose.connection.db;
 		const collection = db.collection("usergoals");
 
-		const result = await collection.updateOne(
+		const updateResult = await collection.updateOne(
 			{ _id: goal._id },
 			{
 				$set: {
@@ -284,32 +231,86 @@ const createGoalDepositAccount = async (userId, goal) => {
 			},
 		);
 
-		console.log(`Direct update result: ${result.modifiedCount} modified`);
+		console.log(`Direct update result: ${updateResult.modifiedCount} modified`);
 
-		if (result.modifiedCount > 0) {
-			// Re-fetch to verify
-			const finalGoal = await UserGoal.findById(goal._id);
-			if (finalGoal && finalGoal.goalDepositAccountId) {
+		if (updateResult.modifiedCount === 0) {
+			// Try with mongoose if direct update failed
+			console.log("⚠️ Direct update failed, trying mongoose...");
+
+			const updatedGoal = await UserGoal.findByIdAndUpdate(
+				goal._id,
+				{
+					$set: {
+						goalDepositAccountId: goalAccountId,
+						goalAccountNumber: accountNumber,
+						goalBankName: bankName,
+						goalBankCode: bankCode,
+						goalAccountStatus: "active",
+						goalAccountBalance: 0,
+						updatedAt: new Date(),
+					},
+				},
+				{
+					new: true,
+					returnDocument: "after",
+				},
+			);
+
+			if (updatedGoal) {
 				console.log(
-					`✅ VERIFIED: Goal account ID is ${finalGoal.goalDepositAccountId}`,
+					`✅ Goal updated via mongoose: ${updatedGoal.goalDepositAccountId}`,
 				);
-				goal.goalDepositAccountId = finalGoal.goalDepositAccountId;
-				goal.goalAccountNumber = finalGoal.goalAccountNumber;
-				goal.goalBankName = finalGoal.goalBankName;
-				goal.goalBankCode = finalGoal.goalBankCode;
+				goal.goalDepositAccountId = updatedGoal.goalDepositAccountId;
+				goal.goalAccountNumber = updatedGoal.goalAccountNumber;
+				goal.goalBankName = updatedGoal.goalBankName;
+				goal.goalBankCode = updatedGoal.goalBankCode;
 
 				return {
 					success: true,
-					goalAccountId: finalGoal.goalDepositAccountId,
-					accountNumber: finalGoal.goalAccountNumber,
-					bankName: finalGoal.goalBankName,
-					bankCode: finalGoal.goalBankCode,
+					goalAccountId: updatedGoal.goalDepositAccountId,
+					accountNumber: updatedGoal.goalAccountNumber,
+					bankName: updatedGoal.goalBankName,
+					bankCode: updatedGoal.goalBankCode,
 					wasExisting: false,
 				};
 			}
 		}
 
-		console.error("❌ CRITICAL: All save methods failed!");
+		// ✅ VERIFY the update worked
+		const verifiedGoal = await UserGoal.findById(goal._id);
+		if (verifiedGoal) {
+			console.log(`✅ Verified goal: ${verifiedGoal._id}`);
+			console.log(
+				`   goalDepositAccountId: ${verifiedGoal.goalDepositAccountId}`,
+			);
+			console.log(`   goalAccountNumber: ${verifiedGoal.goalAccountNumber}`);
+			console.log(`   goalBankName: ${verifiedGoal.goalBankName}`);
+
+			if (verifiedGoal.goalDepositAccountId) {
+				// ✅ Update the original goal reference
+				goal.goalDepositAccountId = verifiedGoal.goalDepositAccountId;
+				goal.goalAccountNumber = verifiedGoal.goalAccountNumber;
+				goal.goalBankName = verifiedGoal.goalBankName;
+				goal.goalBankCode = verifiedGoal.goalBankCode;
+				goal.goalAccountStatus = verifiedGoal.goalAccountStatus;
+
+				console.log(
+					`✅ SUCCESS: Goal account ID is now ${verifiedGoal.goalDepositAccountId}`,
+				);
+				return {
+					success: true,
+					goalAccountId: verifiedGoal.goalDepositAccountId,
+					accountNumber: verifiedGoal.goalAccountNumber,
+					bankName: verifiedGoal.goalBankName,
+					bankCode: verifiedGoal.goalBankCode,
+					wasExisting: false,
+				};
+			}
+		}
+
+		console.error("❌ CRITICAL: Goal account ID still not saved!");
+		console.error("   Goal ID:", goal._id);
+		console.error("   Account ID:", goalAccountId);
 		throw new Error("Failed to save goal account ID to database");
 	} catch (error) {
 		console.error("❌ createGoalDepositAccount error:", error);
