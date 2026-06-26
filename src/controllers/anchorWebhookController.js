@@ -33,6 +33,10 @@ export const handleAnchorWebhook = async (req, res) => {
 		console.log(`📥 Received Anchor webhook: ${eventType}`);
 
 		switch (eventType) {
+			case "virtualNuban.opened":
+				await handleVirtualNubanOpened(payload);
+				break;
+
 			case "accountNumber.created":
 				await handleAccountNumberCreated(payload);
 				break;
@@ -338,150 +342,206 @@ async function handleAccountNumberCreated(payload) {
 
 		const included = payload.included || [];
 
-		// ✅ Extract account number data from included
 		let accountNumberData = null;
 		let depositAccountData = null;
 
 		for (const item of included) {
 			if (item.type === "AccountNumber") {
 				accountNumberData = item;
-				console.log(`✅ Found AccountNumber in included: ${item.id}`);
+				console.log(`✅ Found AccountNumber: ${item.id}`);
 			}
 			if (item.type === "DepositAccount") {
 				depositAccountData = item;
-				console.log(`✅ Found DepositAccount in included: ${item.id}`);
+				console.log(`✅ Found DepositAccount: ${item.id}`);
 			}
 		}
 
-		if (!accountNumberData || !depositAccountData) {
-			console.error("❌ Missing AccountNumber or DepositAccount in webhook");
+		if (!accountNumberData) {
+			console.error("❌ No AccountNumber found in webhook");
 			return;
 		}
 
-		const accountNumberAttrs = accountNumberData.attributes || {};
-		const depositAccountAttrs = depositAccountData.attributes || {};
+		const accNumAttrs = accountNumberData.attributes || {};
+		const accountNumber = accNumAttrs.accountNumber;
+		const metadata = accNumAttrs.metadata || {};
+		const goalId = metadata.goalId;
 
-		// ✅ Extract ALL bank details from the webhook
-		const bank = accountNumberAttrs.bank || {};
-		const accountNumber = accountNumberAttrs.accountNumber;
-		const bankName = bank.name;
-		const bankCode = bank.code;
-		const bankProvider = bank.provider;
-		const accountName =
-			accountNumberAttrs.name || depositAccountAttrs.accountName;
-		const currency = accountNumberAttrs.currency || "NGN";
-		const status = accountNumberAttrs.status || "ACTIVE";
-		const depositAccountId = depositAccountData.id;
+		if (!goalId) {
+			console.error("❌ No goalId found in metadata");
+			return;
+		}
 
-		console.log(`📊 Webhook extracted details:`);
+		// Get bank details
+		const bank = accNumAttrs.bank || {};
+		const bankName = bank.name || "PROVIDUS BANK";
+		const bankCode = bank.code || "000023";
+
+		console.log(`📊 Account Number Created:`);
+		console.log(`   Goal ID: ${goalId}`);
 		console.log(`   Account Number: ${accountNumber}`);
-		console.log(`   Bank Name: ${bankName}`);
-		console.log(`   Bank Code: ${bankCode}`);
-		console.log(`   Bank Provider: ${bankProvider}`);
-		console.log(`   Account Name: ${accountName}`);
-		console.log(`   Currency: ${currency}`);
-		console.log(`   Status: ${status}`);
-		console.log(`   Deposit Account ID: ${depositAccountId}`);
+		console.log(`   Bank: ${bankName} (${bankCode})`);
 
-		// ✅ Find the user from metadata
-		const metadata = accountNumberAttrs.metadata || {};
-		const userId = metadata.userId;
-
-		if (!userId) {
-			console.error("❌ No userId found in webhook metadata");
+		// ✅ Find and update the goal
+		const goal = await UserGoal.findById(goalId);
+		if (!goal) {
+			console.error(`❌ Goal not found: ${goalId}`);
 			return;
 		}
 
-		// ✅ Check if virtual account already exists
-		const existingAccount = await AnchorVirtualAccount.findOne({
-			userId,
-			anchorReference: depositAccountId,
-			isActive: true,
-		});
+		// Update the goal with the account number
+		goal.goalAccountNumber = accountNumber;
+		goal.goalBankName = bankName;
+		goal.goalBankCode = bankCode;
+		goal.goalAccountStatus = "active";
+		await goal.save();
 
-		if (existingAccount) {
-			console.log(
-				`✅ Virtual account already exists: ${existingAccount.accountNumber}`,
-			);
-			// Update with latest data from webhook
-			existingAccount.accountNumber = accountNumber;
-			existingAccount.bankName = bankName;
-			existingAccount.bankCode = bankCode;
-			existingAccount.accountName = accountName;
-			await existingAccount.save();
-			console.log(`✅ Updated virtual account with latest data`);
-			return;
-		}
-
-		// ✅ Get the wallet
-		const wallet = await AnchorWallet.findOne({
-			userId,
-			walletType: "main",
-		});
-
-		if (!wallet) {
-			console.error(`❌ Wallet not found for user: ${userId}`);
-			return;
-		}
-
-		// ✅ Create virtual account with EXACT data from webhook
-		const virtualAccount = await AnchorVirtualAccount.create({
-			userId,
-			anchorCustomerId:
-				depositAccountData.relationships?.customer?.data?.id || null,
-			walletId: wallet._id,
-			accountNumber: accountNumber,
-			bankName: bankName, // ✅ EXACT from webhook - "PROVIDUS BANK"
-			bankCode: bankCode, // ✅ EXACT from webhook - "000023"
-			accountName: accountName,
-			anchorReference: depositAccountId,
-			isActive: true,
-			isMock: false,
-			provider: "anchor",
-			currency: currency,
-			metadata: {
-				bankProvider: bankProvider,
-				webhookId: payload.data?.id,
-				webhookType: payload.data?.type,
-				processedAt: new Date().toISOString(),
-				rawData: {
-					bank: bank,
-					status: status,
-				},
-			},
-		});
-
-		console.log(`✅ Virtual account created from webhook:`);
-		console.log(`   Account: ${virtualAccount.accountNumber}`);
-		console.log(
-			`   Bank: ${virtualAccount.bankName} (${virtualAccount.bankCode})`,
-		);
-		console.log(`   Name: ${virtualAccount.accountName}`);
-
-		// ✅ Update wallet with bank details
-		wallet.accountNumber = virtualAccount.accountNumber;
-		wallet.bankName = virtualAccount.bankName;
-		wallet.walletId = depositAccountId;
-		wallet.isLocal = false;
-		await wallet.save();
-
-		console.log(`✅ Wallet updated with bank: ${wallet.bankName}`);
-
-		// ✅ Send notification to user
-		const user = await User.findById(userId);
-		if (user) {
-			await sendPushToUser(
-				userId,
-				"🏦 Virtual Account Ready",
-				`Your virtual account ${accountNumber} (${bankName}) is ready to receive money.`,
-				{
-					type: "virtual_account_created",
-					accountNumber: accountNumber,
-					bankName: bankName,
-				},
-			);
-		}
+		console.log(`✅ Goal updated with account number: ${accountNumber}`);
 	} catch (error) {
 		console.error("❌ Error processing accountNumber.created webhook:", error);
 	}
 }
+
+// backend/controllers/anchorWebhookController.js - Add this handler
+
+/**
+ * ✅ Handle virtualNuban.opened webhook event
+ * This is triggered when a new virtual account is created
+ */
+async function handleVirtualNubanOpened(payload) {
+	try {
+		console.log("📥 Processing virtualNuban.opened webhook...");
+
+		const included = payload.included || [];
+
+		// ✅ Find the DepositAccount in included
+		let depositAccountData = null;
+		let accountNumberData = null;
+
+		for (const item of included) {
+			if (item.type === "DepositAccount") {
+				depositAccountData = item;
+				console.log(`✅ Found DepositAccount: ${item.id}`);
+			}
+			if (item.type === "AccountNumber") {
+				accountNumberData = item;
+				console.log(`✅ Found AccountNumber: ${item.id}`);
+			}
+		}
+
+		if (!depositAccountData) {
+			console.error("❌ No DepositAccount found in webhook");
+			return;
+		}
+
+		const depositAccountAttrs = depositAccountData.attributes || {};
+		const metadata = depositAccountAttrs.metadata || {};
+		const goalId = metadata.goalId;
+
+		if (!goalId) {
+			console.error("❌ No goalId found in metadata");
+			return;
+		}
+
+		// ✅ Get the account number from AccountNumber data
+		let accountNumber = null;
+		let bankName = "PROVIDUS BANK";
+		let bankCode = "000023";
+
+		if (accountNumberData) {
+			const accNumAttrs = accountNumberData.attributes || {};
+			accountNumber = accNumAttrs.accountNumber;
+			if (accNumAttrs.bank) {
+				bankName = accNumAttrs.bank.name || bankName;
+				bankCode = accNumAttrs.bank.code || bankCode;
+			}
+		}
+
+		// ✅ If account number not found in AccountNumber, try the deposit account
+		if (!accountNumber) {
+			// The deposit account has masked number, but we can use it as fallback
+			accountNumber = depositAccountAttrs.accountNumber;
+		}
+
+		const depositAccountId = depositAccountData.id;
+		const accountName = depositAccountAttrs.accountName || "Kuditrak User";
+		const currency = depositAccountAttrs.currency || "NGN";
+		const status = depositAccountAttrs.status || "ACTIVE";
+		const balance = depositAccountAttrs.availableBalance || 0;
+
+		console.log(`📊 Webhook extracted goal account details:`);
+		console.log(`   Goal ID: ${goalId}`);
+		console.log(`   Account ID: ${depositAccountId}`);
+		console.log(`   Account Number: ${accountNumber}`);
+		console.log(`   Bank: ${bankName} (${bankCode})`);
+		console.log(`   Account Name: ${accountName}`);
+		console.log(`   Currency: ${currency}`);
+		console.log(`   Status: ${status}`);
+		console.log(`   Balance: ${balance}`);
+
+		// ✅ Find the goal in your database
+		const goal = await UserGoal.findById(goalId);
+		if (!goal) {
+			console.error(`❌ Goal not found: ${goalId}`);
+			return;
+		}
+
+		// ✅ Check if the goal already has an account
+		if (goal.goalDepositAccountId) {
+			console.log(`✅ Goal already has account: ${goal.goalDepositAccountId}`);
+			// Update with latest data
+			if (accountNumber) {
+				goal.goalAccountNumber = accountNumber;
+			}
+			if (bankName) {
+				goal.goalBankName = bankName;
+			}
+			if (bankCode) {
+				goal.goalBankCode = bankCode;
+			}
+			goal.goalAccountStatus = status.toLowerCase();
+			await goal.save();
+			console.log(`✅ Goal updated with latest account details`);
+			return;
+		}
+
+		// ✅ Save the account details to the goal
+		goal.goalDepositAccountId = depositAccountId;
+		goal.goalAccountNumber = accountNumber;
+		goal.goalBankName = bankName;
+		goal.goalBankCode = bankCode;
+		goal.goalAccountStatus = status.toLowerCase();
+		goal.goalAccountBalance = balance / 100; // Convert from kobo to NGN
+		await goal.save();
+
+		console.log(`✅ Goal updated with deposit account:`);
+		console.log(`   Goal: ${goal.name}`);
+		console.log(`   Account: ${goal.goalAccountNumber}`);
+		console.log(`   Bank: ${goal.goalBankName}`);
+
+		// ✅ Send notification to user
+		try {
+			const user = await User.findById(goal.userId);
+			if (user) {
+				await sendPushToUser(
+					user._id,
+					"🏦 Goal Account Ready",
+					`Your goal "${goal.name}" now has a dedicated account number: ${accountNumber}`,
+					{
+						type: "goal_account_created",
+						goalId: goal._id,
+						accountNumber: accountNumber,
+						bankName: bankName,
+					},
+				);
+			}
+		} catch (pushError) {
+			console.log("⚠️ Push notification error:", pushError.message);
+		}
+	} catch (error) {
+		console.error("❌ Error processing virtualNuban.opened webhook:", error);
+	}
+}
+
+/**
+ * ✅ Also handle accountNumber.created webhook
+ */
