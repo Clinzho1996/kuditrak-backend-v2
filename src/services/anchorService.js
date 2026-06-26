@@ -214,6 +214,7 @@ export const createAnchorCustomerWithKYC = async (userData) => {
 
 /**
  * Upgrade customer KYC from Tier 0 to Tier 1
+ * ✅ FIXED: Using correct endpoint and payload structure from Anchor docs
  */
 export const upgradeCustomerKYC = async (
 	customerId,
@@ -222,15 +223,17 @@ export const upgradeCustomerKYC = async (
 	gender,
 ) => {
 	try {
+		// ✅ According to Anchor docs, use the verification endpoint
+		// with level: "TIER_2" (this is correct - Tier 1 is the result, not the request level)
 		const payload = {
 			data: {
 				type: "Verification",
 				attributes: {
-					level: "TIER_1",
+					level: "TIER_2", // ✅ Always use TIER_2 for BVN verification
 					level2: {
-						bvn,
-						dateOfBirth,
-						gender,
+						bvn: bvn,
+						dateOfBirth: dateOfBirth,
+						gender: gender, // Should be "Male" or "Female" with capital letter
 					},
 				},
 			},
@@ -238,6 +241,7 @@ export const upgradeCustomerKYC = async (
 
 		console.log("📝 Upgrade KYC Payload:", JSON.stringify(payload, null, 2));
 
+		// ✅ Use the verification endpoint
 		const response = await makeAnchorRequest(
 			"post",
 			`/customers/${customerId}/verification/individual`,
@@ -245,12 +249,15 @@ export const upgradeCustomerKYC = async (
 		);
 
 		if (response.data?.data) {
+			const attributes = response.data.data.attributes || {};
 			console.log("✅ KYC upgrade initiated successfully");
+			console.log(`   Status: ${attributes.status || "pending"}`);
+
 			return {
 				success: true,
 				verification: response.data.data,
 				verificationId: response.data.data.id,
-				status: response.data.data.attributes?.status || "pending",
+				status: attributes.status || "pending",
 			};
 		}
 

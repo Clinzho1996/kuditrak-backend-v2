@@ -898,12 +898,6 @@ export const updateKYC = async (req, res) => {
 		});
 	}
 };
-/**
- * Helper function to create virtual account for user
- */
-// backend/controllers/userController.js - Replace createVirtualAccountForUser
-
-// backend/controllers/userController.js - Replace createVirtualAccountForUser
 
 /**
  * Helper function to create virtual account for user
