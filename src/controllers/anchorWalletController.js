@@ -949,7 +949,31 @@ export const createVirtualAccount = async (req, res) => {
 
 		console.log("🔵 Creating virtual account for user:", userId);
 
-		// Get Anchor customer
+		// ✅ Check if virtual account already exists in local DB
+		const existingVirtualAccount = await AnchorVirtualAccount.findOne({
+			userId,
+			isActive: true,
+		});
+
+		if (existingVirtualAccount) {
+			console.log(
+				`✅ Virtual account already exists: ${existingVirtualAccount.accountNumber}`,
+			);
+			return res.status(200).json({
+				success: true,
+				message: "Virtual account already exists",
+				virtualAccount: {
+					id: existingVirtualAccount._id,
+					accountNumber: existingVirtualAccount.accountNumber,
+					bankName: existingVirtualAccount.bankName,
+					accountName: existingVirtualAccount.accountName,
+					currency: existingVirtualAccount.currency || "NGN",
+					isActive: existingVirtualAccount.isActive,
+				},
+			});
+		}
+
+		// ✅ Get Anchor customer
 		let anchorCustomer = await AnchorCustomer.findOne({ userId });
 		if (!anchorCustomer) {
 			return res.status(404).json({
@@ -961,7 +985,7 @@ export const createVirtualAccount = async (req, res) => {
 		console.log(`✅ Anchor customer found: ${anchorCustomer.anchorCustomerId}`);
 		console.log(`   Local KYC Level: ${anchorCustomer.kycLevel}`);
 
-		// Get user details
+		// ✅ Get user details
 		const user = await User.findById(userId);
 		if (!user) {
 			return res.status(404).json({
@@ -970,7 +994,7 @@ export const createVirtualAccount = async (req, res) => {
 			});
 		}
 
-		// ✅ CRITICAL: Check if KYC needs to be submitted to Anchor
+		// ✅ Check if KYC needs to be submitted to Anchor
 		let anchorKycStatus = null;
 		try {
 			const customerResponse = await anchorService.getAnchorCustomer(
@@ -987,7 +1011,7 @@ export const createVirtualAccount = async (req, res) => {
 			console.log("⚠️ Could not fetch KYC status from Anchor:", err.message);
 		}
 
-		// Check if KYC is actually completed in Anchor
+		// ✅ Check if KYC is actually completed in Anchor
 		const isKycCompletedInAnchor =
 			anchorKycStatus?.kycLevel === "TIER_1" ||
 			anchorKycStatus?.kycLevel === "TIER_2";
@@ -1075,7 +1099,7 @@ export const createVirtualAccount = async (req, res) => {
 
 		console.log(`✅ KYC completed - Proceeding with virtual account creation`);
 
-		// Get user's wallet
+		// ✅ Get or create wallet
 		let wallet = await AnchorWallet.findOne({
 			userId,
 			walletType: "main",
@@ -1095,34 +1119,8 @@ export const createVirtualAccount = async (req, res) => {
 			console.log(`✅ Wallet created: ${wallet.walletId}`);
 		}
 
-		// Check if virtual account already exists in local DB
-		const existingVirtualAccount = await AnchorVirtualAccount.findOne({
-			userId,
-			isActive: true,
-		});
-
-		if (existingVirtualAccount) {
-			console.log(
-				`✅ Virtual account already exists: ${existingVirtualAccount.accountNumber}`,
-			);
-			return res.status(200).json({
-				success: true,
-				message: "Virtual account already exists",
-				virtualAccount: {
-					id: existingVirtualAccount._id,
-					accountNumber: existingVirtualAccount.accountNumber,
-					bankName: existingVirtualAccount.bankName,
-					accountName: existingVirtualAccount.accountName,
-					currency: existingVirtualAccount.currency || "NGN",
-					isActive: existingVirtualAccount.isActive,
-				},
-			});
-		}
-
-		// ✅ STEP 1: Check if deposit account exists in Anchor
+		// ✅ Check if deposit account exists in Anchor
 		let depositAccountId = null;
-		let depositAccountDetails = null;
-
 		try {
 			console.log("🔍 Checking for existing deposit accounts in Anchor...");
 			const accountsResponse = await anchorService.getDepositAccounts(
@@ -1132,14 +1130,13 @@ export const createVirtualAccount = async (req, res) => {
 			if (accountsResponse.success && accountsResponse.accounts?.length > 0) {
 				const existingAcc = accountsResponse.accounts[0];
 				depositAccountId = existingAcc.id || existingAcc.accountId;
-				depositAccountDetails = existingAcc;
 				console.log(`✅ Found existing deposit account: ${depositAccountId}`);
 			}
 		} catch (err) {
 			console.log("⚠️ Could not check existing accounts:", err.message);
 		}
 
-		// ✅ STEP 2: Create deposit account if none exists
+		// ✅ Create deposit account if none exists
 		if (!depositAccountId) {
 			console.log("📝 Creating new deposit account in Anchor...");
 
@@ -1168,11 +1165,10 @@ export const createVirtualAccount = async (req, res) => {
 			}
 
 			depositAccountId = accountResponse.accountId;
-			depositAccountDetails = accountResponse.account;
 			console.log(`✅ Deposit account created: ${depositAccountId}`);
 		}
 
-		// ✅ STEP 3: Get account number with FULL bank details from Anchor
+		// ✅ Get account number with bank details from Anchor
 		console.log(
 			`📝 Getting account number with bank details for: ${depositAccountId}`,
 		);
@@ -1193,40 +1189,37 @@ export const createVirtualAccount = async (req, res) => {
 			});
 		}
 
-		// ✅ Extract ALL bank details from the response - NO HARDCODING
+		// ✅ Extract ALL bank details from Anchor response - NO HARDCODING
 		const accountNumber = accountNumberResponse.accountNumber;
-		const bankName = accountNumberResponse.bankName; // This is the REAL bank name from Anchor
-		const bankCode = accountNumberResponse.bankCode; // This is the REAL bank code from Anchor
+		const bankName = accountNumberResponse.bankName; // "PROVIDUS BANK"
+		const bankCode = accountNumberResponse.bankCode; // "000023"
 		const accountName =
 			accountNumberResponse.accountName || user.fullName || "Kuditrak User";
-
+		const currencyValue = accountNumberResponse.currency || "NGN";
 		const status = accountNumberResponse.status || "ACTIVE";
 
 		console.log(`✅ Account details retrieved from Anchor:`);
 		console.log(`   Account Number: ${accountNumber}`);
-		console.log(`   Bank Name: ${bankName}`);
-		console.log(`   Bank Code: ${bankCode}`);
+		console.log(`   Bank Name: ${bankName} (${bankCode})`);
 		console.log(`   Account Name: ${accountName}`);
-		console.log(`   Currency: ${currency}`);
+		console.log(`   Currency: ${currencyValue}`);
 		console.log(`   Status: ${status}`);
 
-		// ✅ STEP 4: Save virtual account with EXACT bank details from Anchor
+		// ✅ Create virtual account with EXACT bank details from Anchor
 		const virtualAccount = await AnchorVirtualAccount.create({
 			userId,
 			anchorCustomerId: anchorCustomer.anchorCustomerId,
 			walletId: wallet._id,
 			accountNumber: accountNumber,
-			bankName: bankName, // ✅ REAL bank name from Anchor
-			bankCode: bankCode, // ✅ REAL bank code from Anchor
+			bankName: bankName, // ✅ EXACT bank name from Anchor
+			bankCode: bankCode, // ✅ EXACT bank code from Anchor
 			accountName: accountName,
 			anchorReference: depositAccountId,
 			isActive: true,
 			isMock: false,
 			provider: "anchor",
-			currency: currency,
-			// ✅ Store the raw Anchor response for reference
+			currency: currencyValue,
 			metadata: {
-				anchorAccountId: depositAccountId,
 				anchorStatus: status,
 				retrievedAt: new Date().toISOString(),
 			},
@@ -1238,16 +1231,16 @@ export const createVirtualAccount = async (req, res) => {
 		);
 		console.log(`   Account: ${virtualAccount.accountNumber}`);
 
-		// ✅ STEP 5: Update wallet with REAL bank details
+		// ✅ Update wallet with REAL bank details
 		wallet.accountNumber = virtualAccount.accountNumber;
 		wallet.bankName = virtualAccount.bankName;
 		wallet.walletId = depositAccountId;
 		wallet.isLocal = false;
 		await wallet.save();
 
-		console.log("✅ Wallet updated with real Anchor data");
+		console.log(`✅ Wallet updated with real bank: ${wallet.bankName}`);
 
-		// ✅ STEP 6: Send notification
+		// ✅ Send notification
 		try {
 			await sendPushToUser(
 				userId,

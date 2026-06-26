@@ -10,6 +10,8 @@ import { sendPushToUser } from "../services/pushService.js";
 /**
  * Handle Anchor webhook events
  */
+// backend/controllers/anchorWebhookController.js - Update the main handler
+
 export const handleAnchorWebhook = async (req, res) => {
 	try {
 		const signature = req.headers["x-anchor-signature"];
@@ -27,10 +29,13 @@ export const handleAnchorWebhook = async (req, res) => {
 			return res.status(401).json({ error: "Invalid signature" });
 		}
 
-		const eventType = payload.type;
-		console.log(`Received Anchor webhook: ${eventType}`);
+		const eventType = payload.data?.type;
+		console.log(`📥 Received Anchor webhook: ${eventType}`);
 
 		switch (eventType) {
+			case "accountNumber.created":
+				await handleAccountNumberCreated(payload);
+				break;
 			case "customer.identification.approved":
 				await handleCustomerIdentificationApproved(payload);
 				break;
@@ -52,7 +57,7 @@ export const handleAnchorWebhook = async (req, res) => {
 				await handleCardPaymentEvent(payload);
 				break;
 			default:
-				console.log(`Unhandled webhook type: ${eventType}`);
+				console.log(`⚠️ Unhandled webhook type: ${eventType}`);
 		}
 
 		res.status(200).json({ success: true });
@@ -318,5 +323,165 @@ async function handleCardPaymentEvent(payload) {
 				cardLast4: card.last4,
 			},
 		);
+	}
+}
+
+// backend/controllers/anchorWebhookController.js - Handle accountNumber.created
+
+/**
+ * Handle accountNumber.created webhook event
+ * This is where the virtual account should be saved
+ */
+async function handleAccountNumberCreated(payload) {
+	try {
+		console.log("📥 Processing accountNumber.created webhook...");
+
+		const included = payload.included || [];
+
+		// ✅ Extract account number data from included
+		let accountNumberData = null;
+		let depositAccountData = null;
+
+		for (const item of included) {
+			if (item.type === "AccountNumber") {
+				accountNumberData = item;
+				console.log(`✅ Found AccountNumber in included: ${item.id}`);
+			}
+			if (item.type === "DepositAccount") {
+				depositAccountData = item;
+				console.log(`✅ Found DepositAccount in included: ${item.id}`);
+			}
+		}
+
+		if (!accountNumberData || !depositAccountData) {
+			console.error("❌ Missing AccountNumber or DepositAccount in webhook");
+			return;
+		}
+
+		const accountNumberAttrs = accountNumberData.attributes || {};
+		const depositAccountAttrs = depositAccountData.attributes || {};
+
+		// ✅ Extract ALL bank details from the webhook
+		const bank = accountNumberAttrs.bank || {};
+		const accountNumber = accountNumberAttrs.accountNumber;
+		const bankName = bank.name;
+		const bankCode = bank.code;
+		const bankProvider = bank.provider;
+		const accountName =
+			accountNumberAttrs.name || depositAccountAttrs.accountName;
+		const currency = accountNumberAttrs.currency || "NGN";
+		const status = accountNumberAttrs.status || "ACTIVE";
+		const depositAccountId = depositAccountData.id;
+
+		console.log(`📊 Webhook extracted details:`);
+		console.log(`   Account Number: ${accountNumber}`);
+		console.log(`   Bank Name: ${bankName}`);
+		console.log(`   Bank Code: ${bankCode}`);
+		console.log(`   Bank Provider: ${bankProvider}`);
+		console.log(`   Account Name: ${accountName}`);
+		console.log(`   Currency: ${currency}`);
+		console.log(`   Status: ${status}`);
+		console.log(`   Deposit Account ID: ${depositAccountId}`);
+
+		// ✅ Find the user from metadata
+		const metadata = accountNumberAttrs.metadata || {};
+		const userId = metadata.userId;
+
+		if (!userId) {
+			console.error("❌ No userId found in webhook metadata");
+			return;
+		}
+
+		// ✅ Check if virtual account already exists
+		const existingAccount = await AnchorVirtualAccount.findOne({
+			userId,
+			anchorReference: depositAccountId,
+			isActive: true,
+		});
+
+		if (existingAccount) {
+			console.log(
+				`✅ Virtual account already exists: ${existingAccount.accountNumber}`,
+			);
+			// Update with latest data from webhook
+			existingAccount.accountNumber = accountNumber;
+			existingAccount.bankName = bankName;
+			existingAccount.bankCode = bankCode;
+			existingAccount.accountName = accountName;
+			await existingAccount.save();
+			console.log(`✅ Updated virtual account with latest data`);
+			return;
+		}
+
+		// ✅ Get the wallet
+		const wallet = await AnchorWallet.findOne({
+			userId,
+			walletType: "main",
+		});
+
+		if (!wallet) {
+			console.error(`❌ Wallet not found for user: ${userId}`);
+			return;
+		}
+
+		// ✅ Create virtual account with EXACT data from webhook
+		const virtualAccount = await AnchorVirtualAccount.create({
+			userId,
+			anchorCustomerId:
+				depositAccountData.relationships?.customer?.data?.id || null,
+			walletId: wallet._id,
+			accountNumber: accountNumber,
+			bankName: bankName, // ✅ EXACT from webhook - "PROVIDUS BANK"
+			bankCode: bankCode, // ✅ EXACT from webhook - "000023"
+			accountName: accountName,
+			anchorReference: depositAccountId,
+			isActive: true,
+			isMock: false,
+			provider: "anchor",
+			currency: currency,
+			metadata: {
+				bankProvider: bankProvider,
+				webhookId: payload.data?.id,
+				webhookType: payload.data?.type,
+				processedAt: new Date().toISOString(),
+				rawData: {
+					bank: bank,
+					status: status,
+				},
+			},
+		});
+
+		console.log(`✅ Virtual account created from webhook:`);
+		console.log(`   Account: ${virtualAccount.accountNumber}`);
+		console.log(
+			`   Bank: ${virtualAccount.bankName} (${virtualAccount.bankCode})`,
+		);
+		console.log(`   Name: ${virtualAccount.accountName}`);
+
+		// ✅ Update wallet with bank details
+		wallet.accountNumber = virtualAccount.accountNumber;
+		wallet.bankName = virtualAccount.bankName;
+		wallet.walletId = depositAccountId;
+		wallet.isLocal = false;
+		await wallet.save();
+
+		console.log(`✅ Wallet updated with bank: ${wallet.bankName}`);
+
+		// ✅ Send notification to user
+		const user = await User.findById(userId);
+		if (user) {
+			await sendPushToUser(
+				userId,
+				"🏦 Virtual Account Ready",
+				`Your virtual account ${accountNumber} (${bankName}) is ready to receive money.`,
+				{
+					type: "virtual_account_created",
+					accountNumber: accountNumber,
+					bankName: bankName,
+				},
+			);
+		}
+	} catch (error) {
+		console.error("❌ Error processing accountNumber.created webhook:", error);
 	}
 }
