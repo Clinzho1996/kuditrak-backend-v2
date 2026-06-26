@@ -1,6 +1,5 @@
 // backend/controllers/anchorWalletController.js
 import bcrypt from "bcrypt";
-import mongoose from "mongoose";
 import AnchorCustomer from "../models/AnchorCustomer.js";
 import AnchorSubAccount from "../models/AnchorSubAccount.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
@@ -71,6 +70,8 @@ const verifyPin = async (userId, pin) => {
 /**
  * Send money to another Kuditrak user (internal wallet transfer)
  */
+// backend/controllers/anchorWalletController.js - FIXED sendToKuditrakUser
+
 export const sendToKuditrakUser = async (req, res) => {
 	try {
 		const senderId = req.user._id;
@@ -95,7 +96,6 @@ export const sendToKuditrakUser = async (req, res) => {
 
 		// Validate amount
 		if (!amount || amount <= 0) {
-			console.log("❌ Invalid amount:", amount);
 			return res.status(400).json({
 				success: false,
 				error: "Invalid amount",
@@ -108,7 +108,6 @@ export const sendToKuditrakUser = async (req, res) => {
 			await verifyPin(senderId, pin);
 			console.log("✅ PIN verified successfully");
 		} catch (pinError) {
-			console.log("❌ PIN verification failed:", pinError.message);
 			return res.status(400).json({
 				success: false,
 				error: pinError.message,
@@ -135,7 +134,6 @@ export const sendToKuditrakUser = async (req, res) => {
 		}
 
 		if (!recipient) {
-			console.log("❌ Recipient not found");
 			return res.status(404).json({
 				success: false,
 				error: "Recipient not found",
@@ -147,7 +145,6 @@ export const sendToKuditrakUser = async (req, res) => {
 
 		// Check self transfer
 		if (recipient._id.toString() === senderId.toString()) {
-			console.log("❌ Self transfer attempted");
 			return res.status(400).json({
 				success: false,
 				error: "Cannot send to yourself",
@@ -155,14 +152,13 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
-		// Get sender's wallet
+		// ✅ Get sender's wallet with REAL Anchor account ID
 		const senderWallet = await AnchorWallet.findOne({
 			userId: senderId,
 			walletType: "main",
 		});
 
 		if (!senderWallet) {
-			console.log("❌ Sender wallet not found");
 			return res.status(404).json({
 				success: false,
 				error: "Wallet not found",
@@ -171,23 +167,7 @@ export const sendToKuditrakUser = async (req, res) => {
 			});
 		}
 
-		console.log(`💰 Sender balance: ${senderWallet.balance}`);
-
-		// Check balance
-		if (senderWallet.balance < amount) {
-			console.log(
-				`❌ Insufficient balance: ${senderWallet.balance} < ${amount}`,
-			);
-			return res.status(400).json({
-				success: false,
-				error: "Insufficient balance",
-				available: senderWallet.balance,
-				requested: amount,
-				message: `Insufficient balance. Available: ₦${senderWallet.balance.toLocaleString()}`,
-			});
-		}
-
-		// Get or create recipient wallet
+		// ✅ Get or create recipient wallet with REAL Anchor account ID
 		let recipientWallet = await AnchorWallet.findOne({
 			userId: recipient._id,
 			walletType: "main",
@@ -195,174 +175,235 @@ export const sendToKuditrakUser = async (req, res) => {
 
 		if (!recipientWallet) {
 			console.log("🔄 Creating wallet for recipient");
-			try {
-				const customerResult = await getOrCreateAnchorCustomer(recipient._id);
-				if (!customerResult.success) {
-					console.log("❌ Failed to create recipient customer");
-					return res.status(400).json({
-						success: false,
-						error: "Recipient account setup failed",
-						message: "Recipient account is not fully set up",
-					});
-				}
-
-				recipientWallet = await AnchorWallet.create({
-					userId: recipient._id,
-					anchorCustomerId: customerResult.customerId,
-					walletId: `local_${Date.now()}_${recipient._id.toString().slice(-6)}`,
-					walletType: "main",
-					balance: 0,
-					name: "Main Wallet",
-					currency: "NGN",
-					status: "active",
-					isLocal: true,
-				});
-				console.log("✅ Recipient wallet created");
-			} catch (walletError) {
-				console.error("❌ Error creating recipient wallet:", walletError);
-				return res.status(500).json({
+			const customerResult = await getOrCreateAnchorCustomer(recipient._id);
+			if (!customerResult.success) {
+				return res.status(400).json({
 					success: false,
-					error: "Failed to create recipient wallet",
-					message: "Could not set up recipient account",
+					error: "Recipient account setup failed",
+					message: "Recipient account is not fully set up",
 				});
 			}
-		}
 
-		// Generate reference
-		const reference = `SEND_${Date.now()}_${senderId.toString().slice(-6)}`;
-		console.log("📝 Transaction reference:", reference);
-
-		// Perform transfer
-		const session = await mongoose.startSession();
-		session.startTransaction();
-
-		try {
-			// Deduct from sender
-			senderWallet.balance -= amount;
-			await senderWallet.save({ session });
-			console.log(`✅ Deducted ${amount} from sender`);
-
-			// Add to recipient
-			recipientWallet.balance += amount;
-			await recipientWallet.save({ session });
-			console.log(`✅ Added ${amount} to recipient`);
-
-			// Create transactions
-			const senderTransaction = await AnchorTransaction.create(
-				[
-					{
-						userId: senderId,
-						anchorCustomerId: senderWallet.anchorCustomerId,
-						walletId: senderWallet._id,
-						amount: amount,
-						currency: "NGN",
-						type: "debit",
-						category: "transfer",
-						status: "success",
-						description: `Sent to ${recipient.fullName}`,
-						source: "wallet",
-						destination: "wallet",
-						metadata: {
-							reference,
-							recipientId: recipient._id,
-							recipientName: recipient.fullName,
-							note: note || "",
-							isKuditrakTransfer: true,
-							timestamp: new Date().toISOString(),
-							pinVerified: true,
-						},
-					},
-				],
-				{ session },
-			);
-
-			const recipientTransaction = await AnchorTransaction.create(
-				[
-					{
-						userId: recipient._id,
-						anchorCustomerId: recipientWallet.anchorCustomerId,
-						walletId: recipientWallet._id,
-						amount: amount,
-						currency: "NGN",
-						type: "credit",
-						category: "transfer",
-						status: "success",
-						description: `Received from ${req.user.fullName}`,
-						source: "wallet",
-						destination: "wallet",
-						metadata: {
-							reference,
-							senderId: senderId,
-							senderName: req.user.fullName,
-							note: note || "",
-							isKuditrakTransfer: true,
-							timestamp: new Date().toISOString(),
-						},
-					},
-				],
-				{ session },
-			);
-
-			await session.commitTransaction();
-			console.log("✅ Transaction committed");
-
-			// Send notifications
-			await sendPushToUser(
-				senderId,
-				"💸 Money Sent",
-				`You sent ₦${amount.toLocaleString()} to ${recipient.fullName}`,
+			// ✅ Create a REAL deposit account in Anchor for recipient
+			const accountResponse = await anchorService.createDepositAccount(
+				customerResult.customerId,
+				"SAVINGS",
 				{
-					type: "money_sent",
-					amount,
-					recipientId: recipient._id,
-					reference,
-					newBalance: senderWallet.balance,
+					userId: recipient._id.toString(),
+					platform: "kuditrak",
+					currency: "NGN",
+					walletType: "main",
 				},
 			);
 
-			await sendPushToUser(
-				recipient._id,
-				"💰 Money Received",
-				`You received ₦${amount.toLocaleString()} from ${req.user.fullName}`,
-				{
-					type: "money_received",
-					amount,
-					senderId: senderId,
-					senderName: req.user.fullName,
-					reference,
-					newBalance: recipientWallet.balance,
-				},
-			);
+			let walletId = `wallet_${Date.now()}_${recipient._id.toString().slice(-6)}`;
+			let accountNumber = null;
+			let bankName = null;
 
-			res.status(200).json({
-				success: true,
-				message: "Transfer completed successfully",
-				reference,
-				amount: amount,
-				recipient: {
-					id: recipient._id,
-					name: recipient.fullName,
-					email: recipient.email,
-				},
-				senderNewBalance: senderWallet.balance,
-				recipientNewBalance: recipientWallet.balance,
-				transactionId: senderTransaction[0]._id,
-				fee: 0,
-				note: note || "",
-				timestamp: new Date().toISOString(),
+			if (accountResponse.success) {
+				walletId = accountResponse.accountId;
+				console.log(`✅ Recipient deposit account created: ${walletId}`);
+
+				try {
+					const accountNumberResponse =
+						await anchorService.getAccountNumberForDeposit(walletId);
+					if (accountNumberResponse.success) {
+						accountNumber = accountNumberResponse.accountNumber;
+						bankName = accountNumberResponse.bankName;
+					}
+				} catch (err) {
+					console.log("⚠️ Could not get account number:", err.message);
+				}
+			}
+
+			recipientWallet = await AnchorWallet.create({
+				userId: recipient._id,
+				anchorCustomerId: customerResult.customerId,
+				walletId: walletId,
+				walletType: "main",
+				balance: 0,
+				allocated: 0,
+				available: 0,
+				name: "Main Wallet",
+				currency: "NGN",
+				status: "active",
+				accountNumber: accountNumber,
+				bankName: bankName,
+				isLocal: !accountResponse.success,
 			});
-		} catch (transactionError) {
-			console.error("❌ Transaction error:", transactionError);
-			await session.abortTransaction();
-			throw transactionError;
-		} finally {
-			session.endSession();
+			console.log("✅ Recipient wallet created:", recipientWallet._id);
 		}
+
+		// ✅ Step 1: Get REAL balances from Anchor
+		console.log("📊 Fetching real balances from Anchor...");
+
+		const senderBalance = await anchorService.getWalletBalance(
+			senderWallet.walletId,
+		);
+		if (!senderBalance.success) {
+			throw new Error("Could not get sender balance from Anchor");
+		}
+
+		const senderBalanceInNGN = senderBalance.balance / 100;
+		console.log(`📊 Sender balance: ₦${senderBalanceInNGN}`);
+
+		if (senderBalanceInNGN < amount) {
+			return res.status(400).json({
+				success: false,
+				error: "Insufficient balance",
+				available: senderBalanceInNGN,
+				requested: amount,
+				message: `Insufficient balance. Available: ₦${senderBalanceInNGN.toLocaleString()}`,
+			});
+		}
+
+		// ✅ Step 2: Transfer REAL money between Anchor accounts
+		console.log(`🔄 Transferring ₦${amount} from sender to recipient...`);
+
+		const amountInKobo = Math.round(amount * 100);
+		const reference = `SEND_${Date.now()}_${senderId.toString().slice(-6)}`;
+
+		const transferResult = await anchorService.transferBetweenAccounts(
+			senderWallet.walletId, // Source account
+			recipientWallet.walletId, // Destination account
+			amountInKobo, // Amount in kobo
+			"NGN",
+			`Transfer from ${req.user.fullName} to ${recipient.fullName}`,
+		);
+
+		if (!transferResult.success) {
+			throw new Error(
+				"Transfer failed: " + (transferResult.error || "Unknown error"),
+			);
+		}
+
+		console.log(`✅ Transfer completed: ${transferResult.transactionId}`);
+
+		// ✅ Step 3: Update local balances AFTER successful transfer
+		const updatedSenderBalance = await anchorService.getWalletBalance(
+			senderWallet.walletId,
+		);
+		if (updatedSenderBalance.success) {
+			const newBalance = updatedSenderBalance.balance / 100;
+			senderWallet.balance = newBalance;
+			senderWallet.available = newBalance - (senderWallet.allocated || 0);
+			await senderWallet.save();
+			console.log(`✅ Sender balance updated: ₦${senderWallet.balance}`);
+		}
+
+		const updatedRecipientBalance = await anchorService.getWalletBalance(
+			recipientWallet.walletId,
+		);
+		if (updatedRecipientBalance.success) {
+			const newBalance = updatedRecipientBalance.balance / 100;
+			recipientWallet.balance = newBalance;
+			recipientWallet.available = newBalance - (recipientWallet.allocated || 0);
+			await recipientWallet.save();
+			console.log(`✅ Recipient balance updated: ₦${recipientWallet.balance}`);
+		}
+
+		// ✅ Step 4: Create transaction records with Anchor transfer ID
+		const senderTransaction = await AnchorTransaction.create({
+			userId: senderId,
+			anchorCustomerId: senderWallet.anchorCustomerId,
+			walletId: senderWallet._id,
+			amount: amount,
+			currency: "NGN",
+			type: "debit",
+			category: "transfer",
+			status: "success",
+			description: `Sent to ${recipient.fullName}`,
+			source: "wallet",
+			destination: "wallet",
+			metadata: {
+				reference,
+				recipientId: recipient._id,
+				recipientName: recipient.fullName,
+				note: note || "",
+				isKuditrakTransfer: true,
+				timestamp: new Date().toISOString(),
+				pinVerified: true,
+				anchorTransferId: transferResult.transactionId,
+				fromAccount: senderWallet.walletId,
+				toAccount: recipientWallet.walletId,
+			},
+		});
+
+		const recipientTransaction = await AnchorTransaction.create({
+			userId: recipient._id,
+			anchorCustomerId: recipientWallet.anchorCustomerId,
+			walletId: recipientWallet._id,
+			amount: amount,
+			currency: "NGN",
+			type: "credit",
+			category: "transfer",
+			status: "success",
+			description: `Received from ${req.user.fullName}`,
+			source: "wallet",
+			destination: "wallet",
+			metadata: {
+				reference,
+				senderId: senderId,
+				senderName: req.user.fullName,
+				note: note || "",
+				isKuditrakTransfer: true,
+				timestamp: new Date().toISOString(),
+				anchorTransferId: transferResult.transactionId,
+				fromAccount: senderWallet.walletId,
+				toAccount: recipientWallet.walletId,
+			},
+		});
+
+		// ✅ Step 5: Send notifications
+		await sendPushToUser(
+			senderId,
+			"💸 Money Sent",
+			`You sent ₦${amount.toLocaleString()} to ${recipient.fullName}`,
+			{
+				type: "money_sent",
+				amount,
+				recipientId: recipient._id,
+				reference,
+				newBalance: senderWallet.balance,
+			},
+		);
+
+		await sendPushToUser(
+			recipient._id,
+			"💰 Money Received",
+			`You received ₦${amount.toLocaleString()} from ${req.user.fullName}`,
+			{
+				type: "money_received",
+				amount,
+				senderId: senderId,
+				senderName: req.user.fullName,
+				reference,
+				newBalance: recipientWallet.balance,
+			},
+		);
+
+		res.status(200).json({
+			success: true,
+			message: "Transfer completed successfully",
+			reference,
+			amount: amount,
+			recipient: {
+				id: recipient._id,
+				name: recipient.fullName,
+				email: recipient.email,
+			},
+			senderNewBalance: senderWallet.balance,
+			recipientNewBalance: recipientWallet.balance,
+			transactionId: senderTransaction._id,
+			anchorTransferId: transferResult.transactionId,
+			fee: 0,
+			note: note || "",
+			timestamp: new Date().toISOString(),
+		});
 	} catch (error) {
 		console.error("❌ Send to Kuditrak user error:", {
 			message: error.message,
 			stack: error.stack,
-			name: error.name,
 		});
 
 		res.status(500).json({
