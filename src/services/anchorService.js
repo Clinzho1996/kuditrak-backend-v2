@@ -344,16 +344,18 @@ export const updateCustomer = async (customerId, updateData) => {
 };
 
 // ==================== DEPOSIT ACCOUNTS (WALLET LEDGER) ====================
-
-/**
- * Create a deposit account (main wallet) for a customer
- */
 export const createDepositAccount = async (
 	customerId,
 	productName = "SAVINGS",
 	metadata = {},
 ) => {
 	try {
+		console.log(
+			`🔵 createDepositAccount called with customerId: ${customerId}`,
+		);
+		console.log(`   productName: ${productName}`);
+		console.log(`   metadata:`, metadata);
+
 		const payload = {
 			data: {
 				type: "DepositAccount",
@@ -377,7 +379,7 @@ export const createDepositAccount = async (
 		};
 
 		console.log(
-			"📝 Creating deposit account (wallet):",
+			"📝 Creating deposit account payload:",
 			JSON.stringify(payload, null, 2),
 		);
 
@@ -387,10 +389,15 @@ export const createDepositAccount = async (
 			payload,
 		);
 
+		console.log("📥 createDepositAccount response status:", response.status);
+		console.log(
+			"📥 createDepositAccount response data:",
+			JSON.stringify(response.data, null, 2),
+		);
+
 		if (response.data?.data) {
 			const account = response.data.data;
 			console.log(`✅ Deposit account created: ${account.id}`);
-
 			return {
 				success: true,
 				accountId: account.id,
@@ -402,14 +409,40 @@ export const createDepositAccount = async (
 		return {
 			success: false,
 			error: "Invalid response from Anchor",
+			details: response.data,
 		};
 	} catch (error) {
-		console.error("❌ Create deposit account error:");
+		console.error("❌ createDepositAccount error:");
+
 		if (error.response) {
-			console.error("Status:", error.response.status);
-			console.error("Data:", JSON.stringify(error.response.data, null, 2));
+			console.error(`   Status: ${error.response.status}`);
+			console.error(`   Data:`, JSON.stringify(error.response.data, null, 2));
+			return {
+				success: false,
+				error:
+					error.response.data?.message ||
+					error.response.data?.error ||
+					"Anchor API error",
+				statusCode: error.response.status,
+				details: error.response.data,
+			};
 		}
-		return handleAnchorError(error);
+
+		if (error.request) {
+			console.error("   No response received from Anchor");
+			return {
+				success: false,
+				error: "No response from Anchor API",
+				statusCode: 503,
+			};
+		}
+
+		console.error(`   Error: ${error.message}`);
+		return {
+			success: false,
+			error: error.message,
+			statusCode: 500,
+		};
 	}
 };
 

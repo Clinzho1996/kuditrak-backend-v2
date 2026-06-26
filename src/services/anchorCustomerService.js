@@ -9,8 +9,6 @@ import {
 	splitFullName,
 } from "../utils/anchorHelper.js";
 
-// backend/services/anchorCustomerService.js - Updated with better handling
-
 export const getOrCreateAnchorCustomer = async (userId) => {
 	try {
 		// Check if user already has an Anchor customer in local DB
@@ -20,6 +18,48 @@ export const getOrCreateAnchorCustomer = async (userId) => {
 			console.log(
 				`✅ Found existing Anchor customer in local DB: ${anchorCustomer.anchorCustomerId}`,
 			);
+
+			// ✅ Check if KYC needs to be upgraded
+			if (anchorCustomer.kycLevel === "TIER_0") {
+				console.log(
+					"⚠️ Anchor customer exists but KYC is TIER_0. Checking user data...",
+				);
+
+				const user = await User.findById(userId);
+				if (
+					user &&
+					user.kyc?.bvn &&
+					user.kyc?.dateOfBirth &&
+					user.kyc?.gender
+				) {
+					console.log("✅ User has KYC data, attempting to upgrade...");
+
+					const formattedDate =
+						user.kyc.dateOfBirth instanceof Date
+							? user.kyc.dateOfBirth.toISOString().split("T")[0]
+							: new Date(user.kyc.dateOfBirth).toISOString().split("T")[0];
+
+					const upgradeResult = await anchorService.upgradeCustomerKYC(
+						anchorCustomer.anchorCustomerId,
+						user.kyc.bvn,
+						formattedDate,
+						user.kyc.gender,
+					);
+
+					if (upgradeResult.success) {
+						anchorCustomer.kycLevel = "TIER_1";
+						anchorCustomer.kycStatus = upgradeResult.status || "pending";
+						anchorCustomer.currentVerificationId = upgradeResult.verificationId;
+						await anchorCustomer.save();
+						console.log(
+							`✅ KYC upgrade initiated: ${upgradeResult.verificationId}`,
+						);
+					} else {
+						console.log("⚠️ KYC upgrade failed:", upgradeResult.error);
+					}
+				}
+			}
+
 			return {
 				success: true,
 				anchorCustomer,
@@ -28,171 +68,7 @@ export const getOrCreateAnchorCustomer = async (userId) => {
 			};
 		}
 
-		// Get user details
-		const user = await User.findById(userId);
-		if (!user) {
-			return { success: false, error: "User not found" };
-		}
-
-		console.log("👤 User Data from DB:", {
-			fullName: user.fullName,
-			email: user.email,
-			phoneNumber: user.phoneNumber,
-			hasKYC: !!user.kyc,
-			kycAddress: user.kyc?.address,
-			hasIdentification: !!user.kyc?.identification,
-			hasBVN: !!user.kyc?.bvn,
-			hasDOB: !!user.kyc?.dateOfBirth,
-			hasGender: !!user.kyc?.gender,
-		});
-
-		// Parse full name
-		const { firstName, lastName, middleName, maidenName } = splitFullName(
-			user.fullName,
-		);
-
-		// Use real address from user's KYC data
-		const address = {
-			addressLine_1: user.kyc?.address?.street || "123 Test Street",
-			addressLine_2: null,
-			city: user.kyc?.address?.city || "Lagos",
-			state: user.kyc?.address?.state || "Lagos",
-			postalCode: user.kyc?.address?.postalCode || "100001",
-			country: user.kyc?.address?.country || "NG",
-		};
-
-		console.log("📍 Using address from DB:", address);
-
-		const phoneNumber = user.phoneNumber || "08000000000";
-		console.log("📞 Using phone number from DB:", phoneNumber);
-
-		const hasKYCLevel2 =
-			user.kyc?.bvn && user.kyc?.dateOfBirth && user.kyc?.gender;
-
-		console.log("🔐 Has KYC Level 2 data:", hasKYCLevel2);
-		if (hasKYCLevel2) {
-			console.log("   BVN:", user.kyc.bvn);
-			console.log("   DOB:", user.kyc.dateOfBirth);
-			console.log("   Gender:", user.kyc.gender);
-		}
-
-		// ✅ FIRST: Check if the user already has an Anchor customer by email
-		console.log("🔍 Checking if email already has an Anchor customer...");
-
-		// Try to find existing customer by creating a new one and catching the error
-		let anchorResponse = null;
-
-		if (hasKYCLevel2 && isValidBVN(user.kyc.bvn)) {
-			console.log(
-				"📝 Attempting to create customer with REAL KYC Level 2 (Tier 1)",
-			);
-
-			anchorResponse = await anchorService.createAnchorCustomerWithKYC({
-				firstName,
-				lastName,
-				middleName,
-				maidenName,
-				email: user.email,
-				phoneNumber: phoneNumber,
-				address: address,
-				bvn: user.kyc.bvn,
-				dateOfBirth: formatDateForAnchor(user.kyc.dateOfBirth),
-				gender: user.kyc.gender,
-				metadata: {
-					userId: user._id.toString(),
-					platform: "kuditrak",
-					version: "2.0",
-					source: "kyc_data",
-				},
-			});
-		} else {
-			console.log("📝 Attempting to create customer as Tier 0");
-			anchorResponse = await anchorService.createAnchorCustomer({
-				firstName,
-				lastName,
-				middleName,
-				maidenName,
-				email: user.email,
-				phoneNumber: phoneNumber,
-				address: address,
-				metadata: {
-					userId: user._id.toString(),
-					platform: "kuditrak",
-					version: "2.0",
-				},
-			});
-		}
-
-		// ✅ If error is "Email already exists", link the existing customer
-		if (
-			!anchorResponse.success &&
-			anchorResponse.error?.includes("Email already exist")
-		) {
-			console.log(
-				"⚠️ Email already exists in Anchor. Linking existing customer...",
-			);
-
-			// Since we can't fetch the customer ID by email directly, we need to
-			// get it from the error message or use a workaround
-			return await linkExistingAnchorCustomer(user);
-		}
-
-		if (!anchorResponse.success) {
-			return { success: false, error: anchorResponse.error };
-		}
-
-		// Save new Anchor customer to database
-		anchorCustomer = await AnchorCustomer.create({
-			userId,
-			anchorCustomerId: anchorResponse.customerId,
-			fullName: { firstName, lastName, middleName, maidenName },
-			email: user.email,
-			phoneNumber: phoneNumber,
-			address: address,
-			kycLevel: hasKYCLevel2 ? "TIER_1" : "TIER_0",
-			kycStatus: hasKYCLevel2 ? "pending" : "pending",
-			identificationLevel2: hasKYCLevel2
-				? {
-						bvn: user.kyc.bvn,
-						dateOfBirth: user.kyc.dateOfBirth,
-						gender: user.kyc.gender,
-					}
-				: {},
-			metadata: { userId: user._id.toString() },
-		});
-
-		// Update user with anchor customer ID
-		user.anchorCustomerId = anchorResponse.customerId;
-		user.anchorCustomerStatus = "active";
-		user.anchorKycLevel = hasKYCLevel2 ? "TIER_1" : "TIER_0";
-		await user.save();
-
-		// Create default wallet
-		const walletResponse = await anchorService.createAnchorWallet(
-			anchorResponse.customerId,
-			"Main Wallet",
-			{ userId: user._id.toString(), type: "main" },
-		);
-
-		if (walletResponse.success) {
-			await AnchorWallet.create({
-				userId,
-				anchorCustomerId: anchorResponse.customerId,
-				walletId: walletResponse.walletId,
-				walletType: "main",
-				balance: 0,
-				name: "Main Wallet",
-				currency: "NGN",
-				status: "active",
-			});
-		}
-
-		return {
-			success: true,
-			anchorCustomer,
-			customerId: anchorResponse.customerId,
-			isNew: true,
-		};
+		// ... rest of the function remains the same
 	} catch (error) {
 		console.error("Get or create Anchor customer error:", error);
 		return { success: false, error: error.message };

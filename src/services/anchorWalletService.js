@@ -1,4 +1,4 @@
-// backend/controllers/anchorWalletController.js
+// backend/services/anchorWalletService.js
 import AnchorSubAccount from "../models/AnchorSubAccount.js";
 import AnchorTransaction from "../models/AnchorTransaction.js";
 import AnchorWallet from "../models/AnchorWallet.js";
