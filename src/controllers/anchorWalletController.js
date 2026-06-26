@@ -447,6 +447,8 @@ export const createWallet = async (req, res) => {
 
 // ==================== WALLET BALANCE ====================
 
+// backend/controllers/anchorWalletController.js - Fix getBalance
+
 export const getBalance = async (req, res) => {
 	try {
 		const userId = req.user._id;
@@ -460,8 +462,6 @@ export const getBalance = async (req, res) => {
 		// ✅ If no wallet exists, create one
 		if (!wallet) {
 			console.log("🔵 No wallet found, creating one for user:", userId);
-
-			// Create wallet
 			const result = await createWalletInternal(userId);
 			if (!result.success) {
 				return res.status(404).json({
@@ -497,10 +497,13 @@ export const getBalance = async (req, res) => {
 					wallet.walletId,
 				);
 				if (balanceResponse.success) {
-					balance = balanceResponse.balance;
+					// ✅ Convert from kobo to NGN (divide by 100)
+					balance = balanceResponse.balance / 100;
 					wallet.balance = balance;
 					await wallet.save();
-					console.log(`✅ Balance synced from Anchor: ${balance}`);
+					console.log(
+						`✅ Balance synced from Anchor: ${balance} NGN (${balanceResponse.balance} kobo)`,
+					);
 				} else {
 					console.log("⚠️ Could not fetch balance:", balanceResponse.error);
 				}
@@ -532,8 +535,8 @@ export const getBalance = async (req, res) => {
 
 		const responseData = {
 			success: true,
-			balance: balance,
-			available: balance,
+			balance: balance, // ✅ Already in NGN
+			available: balance, // ✅ Already in NGN
 			currency: "NGN",
 			walletId: wallet.walletId,
 			walletName: wallet.name,

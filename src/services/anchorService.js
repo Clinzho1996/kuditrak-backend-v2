@@ -529,21 +529,23 @@ export const getDepositAccount = async (accountId) => {
  * Get deposit account balance
  * ✅ FIXED: Using correct endpoint /api/v1/accounts/balance/{accountId}
  */
+
 export const getDepositAccountBalance = async (depositAccountId) => {
 	try {
-		// ✅ CORRECT ENDPOINT: /accounts/balance/{accountId}
 		const response = await makeAnchorRequest(
 			"get",
 			`/accounts/balance/${depositAccountId}`,
 		);
 
 		if (response.data?.data) {
+			const data = response.data.data;
 			return {
 				success: true,
-				balance: response.data.data.availableBalance || 0,
-				ledgerBalance: response.data.data.ledgerBalance || 0,
-				hold: response.data.data.hold || 0,
-				pending: response.data.data.pending || 0,
+				balance: data.availableBalance || 0, // ✅ Raw (in kobo)
+				balanceInNGN: (data.availableBalance || 0) / 100,
+				ledgerBalance: data.ledgerBalance || 0,
+				hold: data.hold || 0,
+				pending: data.pending || 0,
 				currency: "NGN",
 			};
 		}
@@ -756,6 +758,8 @@ export const getAccountTransactions = async (
  * Get wallet balance
  * ✅ Uses /accounts/balance/{walletId}
  */
+// backend/services/anchorService.js - Update getWalletBalance
+
 export const getWalletBalance = async (walletId) => {
 	try {
 		console.log(`🔍 Fetching wallet balance for: ${walletId}`);
@@ -767,13 +771,19 @@ export const getWalletBalance = async (walletId) => {
 		);
 
 		if (response.data?.data) {
+			const data = response.data.data;
+
+			// ✅ Return the raw balance (in kobo) - let the controller handle conversion
 			return {
 				success: true,
-				balance: response.data.data.availableBalance || 0,
-				ledgerBalance: response.data.data.ledgerBalance || 0,
-				hold: response.data.data.hold || 0,
-				pending: response.data.data.pending || 0,
+				balance: data.availableBalance || 0, // ✅ Raw value from Anchor (in kobo)
+				ledgerBalance: data.ledgerBalance || 0,
+				hold: data.hold || 0,
+				pending: data.pending || 0,
 				currency: "NGN",
+				// Also return the converted values for convenience
+				balanceInNGN: (data.availableBalance || 0) / 100,
+				ledgerBalanceInNGN: (data.ledgerBalance || 0) / 100,
 			};
 		}
 
