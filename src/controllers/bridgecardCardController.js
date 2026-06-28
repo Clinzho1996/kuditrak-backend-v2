@@ -83,7 +83,7 @@ export const createVirtualCard = async (req, res) => {
 		// Send notification
 		await sendPushToUser(
 			userId,
-			`💳 Virtual ${currency} Card Created!`,
+			`Virtual ${currency} Card Created!`,
 			`Your ${currency} virtual card ending in ${last4} has been created.`,
 			{ type: "bridgecard_card_created", cardId: result.cardId, currency },
 		);
@@ -201,7 +201,7 @@ export const createPhysicalCard = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			`💳 Physical ${currency} Card Ordered!`,
+			`Physical ${currency} Card Ordered!`,
 			`Your ${currency} physical card has been ordered. Delivery will be arranged.`,
 			{
 				type: "bridgecard_physical_card_ordered",
@@ -378,7 +378,7 @@ export const toggleCardStatus = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			action === "freeze" ? "🔒 Card Frozen" : "🔓 Card Unfrozen",
+			action === "freeze" ? "Card Frozen" : "Card Unfrozen",
 			`Your ${provider} card ending in ${card.last4} has been ${action === "freeze" ? "frozen" : "unfrozen"}.`,
 			{
 				type: "card_status_changed",
@@ -438,7 +438,7 @@ export const cancelCard = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🗑️ Card Cancelled",
+			"Card Cancelled",
 			`Your ${provider} card ending in ${card.last4} has been cancelled.`,
 			{ type: "card_cancelled", cardId: card.cardId, provider },
 		);
@@ -545,7 +545,7 @@ export const createUSDCard = async (req, res) => {
 		// Send notification
 		await sendPushToUser(
 			userId,
-			`💳 USD ${cardType.charAt(0).toUpperCase() + cardType.slice(1)} Card Created!`,
+			`USD ${cardType.charAt(0).toUpperCase() + cardType.slice(1)} Card Created!`,
 			`Your USD ${cardType} card ending in ${last4} has been created.`,
 			{ type: "bridgecard_usd_card_created", cardId: result.cardId },
 		);
@@ -762,7 +762,7 @@ export const freezeCard = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🔒 Card Frozen",
+			"Card Frozen",
 			`Your USD ${card.cardType} card ending in ${card.last4} has been frozen.`,
 			{ type: "card_frozen", cardId: card.cardId },
 		);
@@ -824,7 +824,7 @@ export const unfreezeCard = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🔓 Card Unfrozen",
+			"Card Unfrozen",
 			`Your USD ${card.cardType} card ending in ${card.last4} has been unfrozen.`,
 			{ type: "card_unfrozen", cardId: card.cardId },
 		);
@@ -883,7 +883,7 @@ export const updateCardPin = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🔑 Card PIN Updated",
+			"Card PIN Updated",
 			`Your USD ${card.cardType} card ending in ${card.last4} PIN has been updated.`,
 			{ type: "card_pin_updated", cardId: card.cardId },
 		);
@@ -954,7 +954,7 @@ export const deleteCard = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🗑️ Card Deleted",
+			"Card Deleted",
 			`Your USD ${card.cardType} card ending in ${card.last4} has been deleted.`,
 			{ type: "card_deleted", cardId: card.cardId },
 		);
@@ -1151,7 +1151,7 @@ export const createNGNCard = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			`💳 NGN ${cardType.charAt(0).toUpperCase() + cardType.slice(1)} Card Created!`,
+			`NGN ${cardType.charAt(0).toUpperCase() + cardType.slice(1)} Card Created!`,
 			`Your NGN ${cardType} card ending in ${last4} has been created.`,
 			{ type: "bridgecard_ngn_card_created", cardId: result.cardId },
 		);
@@ -1292,7 +1292,7 @@ export const fundNGNCard = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"💰 NGN Card Funded",
+			"NGN Card Funded",
 			`₦${amount} has been added to your NGN card ending in ${card.last4}.`,
 			{ type: "ngn_card_funded", cardId: card.cardId, amount },
 		);
@@ -1436,7 +1436,7 @@ export const unloadUSDCard = async (req, res) => {
 		// Send notification with correct amounts
 		await sendPushToUser(
 			userId,
-			"💸 Card Unloaded",
+			"Card Unloaded",
 			`$${amount.toFixed(2)} (₦${ngnAmount.toFixed(2)}) has been withdrawn from ${card.metaData?.cardName || "your card"} ending in ${card.last4}.`,
 			{
 				type: "card_unloaded",
@@ -1590,7 +1590,7 @@ export const unloadNGNCard = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"💸 NGN Card Unloaded",
+			"NGN Card Unloaded",
 			`₦${amount.toFixed(2)} has been withdrawn from ${card.metaData?.cardName || "your card"} ending in ${card.last4}.`,
 			{
 				type: "ngn_card_unloaded",
@@ -1795,7 +1795,7 @@ export const freezeNGNCard = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🔒 NGN Card Frozen",
+			"NGN Card Frozen",
 			`Your NGN card ending in ${card.last4} has been frozen.`,
 			{ type: "ngn_card_frozen", cardId: card.cardId },
 		);
@@ -1853,7 +1853,7 @@ export const unfreezeNGNCard = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🔓 NGN Card Unfrozen",
+			"NGN Card Unfrozen",
 			`Your NGN card ending in ${card.last4} has been unfrozen.`,
 			{ type: "ngn_card_unfrozen", cardId: card.cardId },
 		);
@@ -2070,7 +2070,7 @@ export const unloadCard = async (req, res) => {
 		const currencySymbol = card.currency === "USD" ? "$" : "₦";
 		await sendPushToUser(
 			userId,
-			"💸 Card Unloaded",
+			"Card Unloaded",
 			`${currencySymbol}${amount.toFixed(2)} has been withdrawn from ${card.metaData?.cardName || "your card"} ending in ${card.last4}.`,
 			{
 				type: "card_unloaded",

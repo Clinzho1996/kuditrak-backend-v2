@@ -357,7 +357,7 @@ export const sendToKuditrakUser = async (req, res) => {
 		// ✅ Step 5: Send notifications
 		await sendPushToUser(
 			senderId,
-			"💸 Money Sent",
+			"Money Sent",
 			`You sent ₦${amount.toLocaleString()} to ${recipient.fullName}`,
 			{
 				type: "money_sent",
@@ -370,7 +370,7 @@ export const sendToKuditrakUser = async (req, res) => {
 
 		await sendPushToUser(
 			recipient._id,
-			"💰 Money Received",
+			"Money Received",
 			`You received ₦${amount.toLocaleString()} from ${req.user.fullName}`,
 			{
 				type: "money_received",
@@ -766,7 +766,7 @@ export const freezeWallet = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🔒 Wallet Frozen",
+			"Wallet Frozen",
 			"Your wallet has been frozen for security reasons.",
 			{ type: "wallet_frozen", reason },
 		);
@@ -813,7 +813,7 @@ export const unfreezeWallet = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🔓 Wallet Unfrozen",
+			"Wallet Unfrozen",
 			"Your wallet has been unfrozen.",
 			{ type: "wallet_unfrozen" },
 		);
@@ -1285,7 +1285,7 @@ export const createVirtualAccount = async (req, res) => {
 		try {
 			await sendPushToUser(
 				userId,
-				"🏦 Virtual Account Created",
+				"Virtual Account Created",
 				`Your virtual account ${virtualAccount.accountNumber} (${virtualAccount.bankName}) is ready to receive money.`,
 				{
 					type: "virtual_account_created",
@@ -1390,7 +1390,7 @@ export const topupWallet = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"💰 Wallet Funded",
+			"Wallet Funded",
 			`${currency} ${amount.toLocaleString()} has been added to your wallet.`,
 			{
 				type: "wallet_funded",
@@ -1467,7 +1467,7 @@ export const verifyTopup = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"✅ Payment Verified",
+			"Payment Verified",
 			`Your topup of ${transaction.currency} ${transaction.amount.toLocaleString()} has been verified.`,
 			{
 				type: "topup_verified",
@@ -1662,7 +1662,7 @@ export const withdrawToBank = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"💸 Withdrawal Successful",
+			"Withdrawal Successful",
 			`₦${amount.toLocaleString()} has been withdrawn to ${bankName || "your bank account"}`,
 			{
 				type: "withdrawal_success",
@@ -2203,7 +2203,7 @@ export const createSubAccount = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🎯 Savings Goal Created!",
+			" Goal Created!",
 			`You've created a new savings goal: ${name}`,
 			{ type: "sub_account_created", subAccountId: subAccount.subAccountId },
 		);
@@ -2300,7 +2300,7 @@ export const fundSubAccount = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"💰 Sub-Account Funded",
+			"Sub-Account Funded",
 			`₦${amount.toLocaleString()} added to ${subAccount.name}`,
 			{
 				type: "sub_account_funded",
@@ -2375,7 +2375,7 @@ export const withdrawFromSubAccount = async (req, res) => {
 
 			await sendPushToUser(
 				userId,
-				"⚠️ Early Withdrawal Penalty Applied",
+				"Early Withdrawal Penalty Applied",
 				`A 7% penalty (₦${penalty.toLocaleString()}) was applied for early withdrawal from ${subAccount.name}`,
 				{ type: "penalty_applied", subAccountId, penalty },
 			);
@@ -2408,7 +2408,7 @@ export const withdrawFromSubAccount = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"💸 Sub-Account Withdrawal",
+			"Sub-Account Withdrawal",
 			`₦${amount.toLocaleString()} withdrawn from ${subAccount.name}`,
 			{
 				type: "sub_account_withdrawn",
@@ -2454,7 +2454,7 @@ export const lockSubAccount = async (req, res) => {
 
 		await sendPushToUser(
 			userId,
-			"🔒 Sub-Account Locked",
+			"Sub-Account Locked",
 			`${subAccount.name} is locked until ${new Date(unlockDate).toLocaleDateString()}`,
 			{ type: "sub_account_locked", subAccountId, unlockDate },
 		);

@@ -88,7 +88,7 @@ export const registerCardholder = async (req, res) => {
 		// Send notification
 		await sendPushToUser(
 			userId,
-			"🏦 Bridgecard Registration Submitted",
+			"Bridgecard Registration Submitted",
 			"Your cardholder registration is being processed. You'll be notified when verified.",
 			{ type: "bridgecard_registered", cardholderId: result.cardholderId },
 		);
